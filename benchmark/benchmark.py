@@ -151,6 +151,16 @@ if __name__ == "__main__":
         args.token_path, use_fast=False, padding_side="left", trust_remote_code=True, legacy=False
     )
 
+    if tokenizer.pad_token is None:
+        if hasattr(tokenizer, 'eos_id'):
+            tokenizer.pad_token_id = tokenizer.eos_id
+        elif hasattr(tokenizer, 'im_end_id'):
+            tokenizer.pad_token_id = tokenizer.im_end_id
+        else:
+            tokenizer.pad_token_id = 0
+        tokenizer.pad_token = tokenizer.decode([tokenizer.pad_token_id])
+        print(f"[INFO] set pad_token_id as {tokenizer.pad_token_id}")
+        
     try:
         import xfastertransformer
 
@@ -184,7 +194,11 @@ if __name__ == "__main__":
                 print("[INFO] chat mode only support batchsize=1")
             input_ids = build_inputs_chatglm(tokenizer, input_prompts, args.padding)
         else:
-            input_ids = tokenizer(input_prompts, return_tensors="pt", padding=args.padding).input_ids
+            if args.padding:
+                padding = "max_length"
+            else:
+                padding = False
+            input_ids = tokenizer(input_prompts, return_tensors="pt", padding=padding, max_length=int(args.token_in)).input_ids
         input_token_nums = int(torch.numel(input_ids) / args.batch_size)
         if args.token_in is not None and int(args.token_in) != input_token_nums:
             print(f"[WARN] input_token_size ({input_token_nums}) != required_input_size ({args.token_in})")
