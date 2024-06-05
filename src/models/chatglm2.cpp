@@ -106,13 +106,13 @@ void ChatGLM2<WeiT, KVCacheT>::prepareAttnMask(int *ids, int step) {
 }
 
 template <typename WeiT, typename KVCacheT>
-void ChatGLM2<WeiT, KVCacheT>::embeddingForward(int *ids, float *output, int batchSize, int seqLen) {
-    embedding->forward(ids, output, batchSize, seqLen);
+void ChatGLM2<WeiT, KVCacheT>::embeddingForward(int *ids, float *output, int tokenSize) {
+    embedding->forward(ids, output, tokenSize);
 }
 
 template <typename WeiT, typename KVCacheT>
-void ChatGLM2<WeiT, KVCacheT>::embeddingForward(int *ids, bfloat16_t *output, int batchSize, int seqLen) {
-    embedding->forward(ids, output, batchSize, seqLen);
+void ChatGLM2<WeiT, KVCacheT>::embeddingForward(int *ids, bfloat16_t *output, int tokenSize) {
+    embedding->forward(ids, output, tokenSize);
 }
 
 template <typename WeiT, typename KVCacheT>
@@ -175,3 +175,4 @@ int *ChatGLM2<WeiT, KVCacheT>::getPositionIds(int *ids, int batchSize, int seqLe
     return positionIds;
 }
 
+IMPLEMENT_MODEL(ChatGLM2, chatglm2)

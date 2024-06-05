@@ -33,7 +33,7 @@ public:
         REQUIRES(ctx->actType == DecoderContext::SWIGLU, "unsupported activation.");
 
         // Vertically split the gate weight and up weight
-        hpj::Matrix<WeiT> convertedGateWeight, convertedUpWeight, convertedDownWeight;
+        xft::Matrix<WeiT> convertedGateWeight, convertedUpWeight, convertedDownWeight;
 
         auto range = SplitUtil::getTaskRange(intermediateSize, ctx->numSplit, ctx->splitIdx);
         int colSplit = range.second - range.first;
@@ -43,15 +43,15 @@ public:
             OriWeiT *upW = (OriWeiT *)malloc(hiddenSize * colSplit * sizeof(OriWeiT));
             if (trans) {
                 int blockSize = colSplit * hiddenSize;
-                memcpy(gateW, gate_upW + ctx->splitIdx * blockSize, blockSize * sizeof(OriWeiT));
-                memcpy(upW, gate_upW + intermediateSize * hiddenSize + ctx->splitIdx * blockSize,
+                memcpy(gateW, gate_upW + range.first * hiddenSize, blockSize * sizeof(OriWeiT));
+                memcpy(upW, gate_upW + intermediateSize * hiddenSize + range.first * hiddenSize,
                         blockSize * sizeof(OriWeiT));
             } else {
                 const OriWeiT *weightPTR = gate_upW;
                 for (int i = 0; i < hiddenSize; i++) {
-                    memcpy(gateW + i * colSplit, weightPTR + ctx->splitIdx * colSplit, colSplit * sizeof(OriWeiT));
+                    memcpy(gateW + i * colSplit, weightPTR + range.first, colSplit * sizeof(OriWeiT));
                     weightPTR += intermediateSize;
-                    memcpy(upW + i * colSplit, weightPTR + ctx->splitIdx * colSplit, colSplit * sizeof(OriWeiT));
+                    memcpy(upW + i * colSplit, weightPTR + range.first, colSplit * sizeof(OriWeiT));
                     weightPTR += intermediateSize;
                 }
             }
@@ -76,14 +76,13 @@ public:
                 OriWeiT *gateUpW = (OriWeiT *)malloc(hiddenSize * colSplitStride * sizeof(OriWeiT));
                 const OriWeiT *weightPTR = gate_upW;
                 for (int i = 0; i < hiddenSize; i++) {
-                    memcpy(gateUpW + i * colSplitStride, weightPTR + ctx->splitIdx * colSplit,
-                            colSplit * sizeof(OriWeiT));
+                    memcpy(gateUpW + i * colSplitStride, weightPTR + range.first, colSplit * sizeof(OriWeiT));
                     weightPTR += intermediateSize;
-                    memcpy(gateUpW + colSplit + i * colSplitStride, weightPTR + ctx->splitIdx * colSplit,
+                    memcpy(gateUpW + colSplit + i * colSplitStride, weightPTR + range.first,
                             colSplit * sizeof(OriWeiT));
                     weightPTR += intermediateSize;
                 }
-                hpj::Matrix<WeiT> quantizedCatWeights;
+                xft::Matrix<WeiT> quantizedCatWeights;
                 ctx->mmHelper->convertWeight(trans, hiddenSize, colSplitStride, gateUpW, nullptr, nullptr,
                         quantizedCatWeights, this->catWeightsScale, this->catWeightsZero, this->catWeightsSum);
                 this->catWeights.Resize(quantizedCatWeights.Rows(), quantizedCatWeights.Cols());

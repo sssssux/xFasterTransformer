@@ -105,13 +105,13 @@ void Qwen2LLM<WeiT, KVCacheT>::prepareAttnMask(int *ids, int step) {
 }
 
 template <typename WeiT, typename KVCacheT>
-void Qwen2LLM<WeiT, KVCacheT>::embeddingForward(int *ids, float *output, int batchSize, int seqLen) {
-    embedding->forward(ids, output, batchSize, seqLen);
+void Qwen2LLM<WeiT, KVCacheT>::embeddingForward(int *ids, float *output, int tokenSize) {
+    embedding->forward(ids, output, tokenSize);
 }
 
 template <typename WeiT, typename KVCacheT>
-void Qwen2LLM<WeiT, KVCacheT>::embeddingForward(int *ids, bfloat16_t *output, int batchSize, int seqLen) {
-    embedding->forward(ids, output, batchSize, seqLen);
+void Qwen2LLM<WeiT, KVCacheT>::embeddingForward(int *ids, bfloat16_t *output, int tokenSize) {
+    embedding->forward(ids, output, tokenSize);
 }
 
 template <typename WeiT, typename KVCacheT>
@@ -123,3 +123,5 @@ template <typename WeiT, typename KVCacheT>
 void Qwen2LLM<WeiT, KVCacheT>::lastLayerNormForward(bfloat16_t *input, bfloat16_t *output, int rows) {
     finalLN.forward(input, output, rows);
 }
+
+IMPLEMENT_MODEL(Qwen2LLM, qwen2)

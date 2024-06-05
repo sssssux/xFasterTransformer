@@ -15,12 +15,15 @@
 #pragma once
 #include <cstdint>
 #include <tuple>
+#include "sequence.h"
 
 class DecoderContext;
 class Messenger;
 
 class AbstractDecoder {
 public:
+    virtual ~AbstractDecoder() {}
+
     // Forward function with the input IDs with shape of dims - (batchSize, beamSize, seqLen)
     // Return the decoding result, split offset, and split size
     // The returned result is a split representing the possibilities of next token, like the shadow part in below graph
@@ -34,6 +37,8 @@ public:
     //    v               |_____________|_____________|||||||||||||||_____________|__________|
     //                    |<----------------------- vocabSize  ----------------------------->|
     virtual std::tuple<float *, int, int> forward(int *ids, int64_t *dims, int step, bool logits_all = false) = 0;
+
+    virtual std::tuple<float *, int, int> forward(std::vector<xft::SequenceMeta *> &seq, bool logits_all = false) = 0;
 
     // Reorder cached keys and values, size=batchSize*beamSize
     virtual void reorderCache(int *idx, int size) = 0;
