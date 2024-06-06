@@ -360,21 +360,21 @@ public:
             // TODO: Error: different scope when dynamic loading so file
             // this->messenger.worldRecvFP32(embBuf, count, prev_world_rank, curr_world_rank);
             if (!SequencePool::getInstance().has(sequenceID)) {
-                auto *seqs = SequencePool::getInstance().newMeta(sequenceID, seqLen);
-                seqs->get(0)->setPastSeqLen(pastSeqLen);
-                seqs->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
-                SequencePool::getInstance().add(seqs->get(0)->getSequenceID(), seqs);
+                auto *groupMeta = SequencePool::getInstance().newGroupMeta(sequenceID, seqLen);
+                groupMeta->get(0)->setPastSeqLen(pastSeqLen);
+                groupMeta->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
+                SequencePool::getInstance().add(groupMeta);
             }
             TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(sequenceID));
         }
 
         if (!InputQueue::getInstance().empty()) {
             if (!TaskWaitingQueue::getInstance().isFull()) {
-                auto *seqs = InputQueue::getInstance().pop();
-                seqs->get(0)->setPastSeqLen(pastSeqLen);
-                seqs->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
-                SequencePool::getInstance().add(seqs->get(0)->getSequenceID(), seqs);
-                TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(seqs->get(0)->getSequenceID()));
+                auto *groupMeta = InputQueue::getInstance().pop();
+                groupMeta->get(0)->setPastSeqLen(pastSeqLen);
+                groupMeta->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
+                SequencePool::getInstance().add(groupMeta);
+                TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(groupMeta->get(0)->getSequenceID()));
             }
         }
 
@@ -794,10 +794,19 @@ protected:
                     epsilon, vocabSize, embeddingSize, maxPositions, maxPosEmbed, maxSeqLength, tpRank, tpSize, tsSize, 
                     tsRank, ppSize, ppRank, ropeParamsPtr, useLogN, useNTK));
 
+            int engineIdx = 0;
             if (env.getEngineKind() == xft::DeviceKind::iGPU && env.getEngineIndex() < 0) // Sequential assignment
-                this->context->mmHelper = new MMHelper(env.getEngineKind(), ppRank * tpSize + tpRank);
+                engineIdx = ppRank * tpSize + tpRank;
             else // assignment through the user
-                this->context->mmHelper = new MMHelper(env.getEngineKind(), env.getEngineIndex());
+                engineIdx = env.getEngineIndex();
+
+            this->context->mmHelper = new MMHelper(env.getEngineKind(), engineIdx);
+#ifdef GPU
+            auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+            this->context->device = new sycl::queue(devices[this->context->mmHelper->getEngineCount() + engineIdx]);
+#else
+            this->context->device = nullptr;
+#endif
         }
 
         return this->context.get();
@@ -816,7 +825,7 @@ protected:
         int kvSize = attHeadSize * kvHeadNum;
         int qkvSize = qSize + 2 * kvSize;
 
-#define ALLOC(size, alignment) xft::alloc((size), (alignment))
+#define ALLOC(size, alignment) xft::alloc((size), nullptr, (alignment))
         OriWeiT *qkvWeight = (OriWeiT *)ALLOC(hiddenSize * qkvSize * sizeof(OriWeiT), 64);
         float *qkvScales = nullptr;
         float *qkvZeros = nullptr;

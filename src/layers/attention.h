@@ -25,12 +25,12 @@
 #include "gemm_kernel_ext.h"
 #include "kvcache_tensor.h"
 #include "matmul_helper.h"
+#include "rms_norm.h"
+#include "rotary_embedding.h"
 #include "sequence.h"
 #include "simple_mem_pool.h"
 #include "transformer_ctx.h"
 #include "transformer_util.h"
-
-#include "rotary_embedding.h"
 
 /**
  * WeiT: weight data type
@@ -50,6 +50,8 @@ public:
 
         //todo(marvin): clear this code after all rotary_emb refactor
         if constexpr (std::is_same<QKPO_CLS, LlamaRotaryEmbedding>::value) { qkpo = LlamaRotaryEmbedding(ctx); }
+
+        norm = new NORM_CLS(ctx);
 
         // Group attention or multi-head attention (multi-head attn is a special case of group attn)
         if (ctx->attHeadNum % ctx->kvHeadNum == 0) {
@@ -88,7 +90,6 @@ public:
         int qResponsibleCols = (this->endQHead - this->startQHead) * headSize;
         int kvResponsibleCols = (this->endKVHead - this->startKVHead) * headSize;
         int responsibleCols = qResponsibleCols + 2 * kvResponsibleCols;
-        qkvWeight.Resize(hiddenSize, responsibleCols);
 
         constexpr int sizeFactor = std::is_same_v<OriWeiT, uint4x2_t> ? 2 : 1;
 
@@ -138,7 +139,19 @@ public:
         xft::Matrix<WeiT> convertedqkvWeight;
         ctx->mmHelper->convertWeight(trans, hiddenSize, responsibleCols, concatBuf, concatScale, concatZero,
                 convertedqkvWeight, qkvWeightScale, qkvWeightZero, qkvWeightSum);
+
+#ifdef GPU
+        xft::Matrix<WeiT> qkvWeightT;
+        qkvWeightT.Resize(hiddenSize, responsibleCols);
+        ctx->mmHelper->transposeWeight(true, convertedqkvWeight, qkvWeightT);
+
+        WeiT *qkvWeiData = (WeiT *)xft::alloc(hiddenSize * responsibleCols * sizeof(WeiT), ctx->device);
+        qkvWeight.Assign(qkvWeiData, hiddenSize, responsibleCols, responsibleCols);
+        xft::memcopy(qkvWeight.Data(), qkvWeightT.Data(), hiddenSize * responsibleCols * sizeof(WeiT), ctx->device);
+#else
+        qkvWeight.Resize(hiddenSize, responsibleCols);
         ctx->mmHelper->packWeight(trans, convertedqkvWeight, qkvWeight);
+#endif
 
         free(concatBuf);
         free(concatScale);
@@ -165,16 +178,29 @@ public:
 
         // Weights for attention output
         // Horizontally split the weight, as the source (PyTorch weight) is transposed, thus looks like vertically
-        xft::Matrix<WeiT> convertedWeight;
+        xft::Matrix<WeiT> convertedOutWeight;
         ctx->mmHelper->convertWeight(trans, ctx->attHeadNum * ctx->attHeadSize, hiddenSize, attnOutWeight, attnOutScale,
-                attnOutZero, this->startQHead * headSize, qResponsibleCols, false, convertedWeight,
+                attnOutZero, this->startQHead * headSize, qResponsibleCols, false, convertedOutWeight,
                 attnOutputWeightScale, attnOutputWeightZero, attnOutputWeightSum, true);
-        ctx->mmHelper->packWeight(trans, convertedWeight, attnOutputWeight);
+
+#ifdef GPU
+        xft::Matrix<WeiT> outWeightT;
+        outWeightT.Resize(ctx->attHeadNum * ctx->attHeadSize, hiddenSize);
+        ctx->mmHelper->transposeWeight(true, convertedOutWeight, outWeightT);
+
+        WeiT *outWeiData = (WeiT *)xft::alloc(ctx->attHeadNum * ctx->attHeadSize * hiddenSize * sizeof(WeiT), ctx->device);
+        attnOutputWeight.Assign(outWeiData, ctx->attHeadNum * ctx->attHeadSize, hiddenSize, hiddenSize);
+        int outWeightTSize = ctx->attHeadNum * ctx->attHeadSize * hiddenSize * sizeof(WeiT);
+        xft::memcopy(attnOutputWeight.Data(), outWeightT.Data(), outWeightTSize, ctx->device);
+#else
+        attnOutputWeight.Resize(ctx->attHeadNum * ctx->attHeadSize, hiddenSize);
+        ctx->mmHelper->packWeight(trans, convertedOutWeight, attnOutputWeight);
+#endif
 
 #ifdef DEBUG
-        dbg.debugPrint(">>> attention output weight: [%d, %d] (%d)\n", convertedWeight.Rows(), convertedWeight.Cols(),
-                convertedWeight.Stride());
-        dbg.dumpMatrix(convertedWeight);
+        dbg.debugPrint(">>> attention output weight: [%d, %d] (%d)\n", convertedOutWeight.Rows(),
+                convertedOutWeight.Cols(), convertedOutWeight.Stride());
+        dbg.dumpMatrix(convertedOutWeight);
         dbg.debugPrint("attention output packed weight: [%d, %d] (%d)\n", attnOutputWeight.Rows(),
                 attnOutputWeight.Cols(), attnOutputWeight.Stride());
         dbg.dumpMatrix(attnOutputWeight);
@@ -191,7 +217,7 @@ public:
         }
 
         // LayerNorm
-        if (doLNorm) this->norm.setWeight(gamma1, beta1, hiddenSize);
+        if (doLNorm) this->norm->setWeight(gamma1, beta1, hiddenSize);
     }
 
 #ifdef DEBUG
@@ -246,7 +272,7 @@ public:
 
         if (doLnBefore) {
             TimeLine t1("input.layer_norm");
-            norm.forward(inputBuffer.Data(), imBuffer.Data(), inputBuffer.Rows(), inputBuffer.Stride(),
+            norm->forward(inputBuffer.Data(), imBuffer.Data(), inputBuffer.Rows(), inputBuffer.Stride(),
                     imBuffer.Stride(), epsilon);
         }
 #ifdef DEBUG
@@ -298,6 +324,10 @@ public:
                 std::iota(posIds.begin(), posIds.end(), pastSeqLen);
             }
             qkpo.forward(query.Data(), key.Data(), query.Stride(), key.Stride(), qkShape, posIds.data());
+#ifdef GPU
+            int64_t size = ctx->batchSize * ctx->inputSeqLen * qkvCols * sizeof(float);
+            xft::memcopy(qkvMatMul.Data(), query.Data(), size, ctx->device); // error: need CPU ptr and GPU ptr
+#endif
         }
         t3.release();
 
@@ -341,6 +371,11 @@ public:
         dbg.debugPrint(">>> attention_%d (softmax * value): [%d, %d] (%d)\n", ctx->splitIdx, attnSplit.Rows(),
                 attnSplit.Cols(), attnSplit.Stride());
         dbg.dumpMatrix(attnSplit);
+#endif
+
+#ifdef GPU
+        int64_t size = ctx->batchSize * ctx->inputSeqLen * qkvCols * sizeof(float);
+        xft::memcopy(qkvMatMul.Data(), attnSplit.Data(), size, ctx->device); // error: need CPU ptr and GPU ptr
 #endif
 
         TimeLine t5("Output");
@@ -388,7 +423,7 @@ public:
 
         if (doLnAfter) {
             TimeLine t6("result.layer_norm");
-            norm.forward(outBuffer.Data(), outBuffer.Data(), outBuffer.Rows(), outBuffer.Stride(), outBuffer.Stride());
+            norm->forward(outBuffer.Data(), outBuffer.Data(), outBuffer.Rows(), outBuffer.Stride(), outBuffer.Stride());
 #ifdef DEBUG
             dbg.debugPrint("LayerNorm after attention: [%d, %d] (%d)\n", outBuffer.Rows(), outBuffer.Cols(),
                     outBuffer.Stride());
@@ -431,7 +466,7 @@ public:
 
         if (doLnBefore) {
             TimeLine t1("input.layer_norm");
-            norm.forward(inputBuffer.Data(), imBuffer.Data(), inputBuffer.Rows(), inputBuffer.Stride(),
+            norm->forward(inputBuffer.Data(), imBuffer.Data(), inputBuffer.Rows(), inputBuffer.Stride(),
                     imBuffer.Stride(), epsilon);
         }
 #ifdef DEBUG
@@ -575,7 +610,7 @@ public:
 
         if (!doLnBefore) {
             TimeLine t6("result.layer_norm");
-            norm.forward(outBuffer.Data(), outBuffer.Data(), outBuffer.Rows(), outBuffer.Stride(), outBuffer.Stride());
+            norm->forward(outBuffer.Data(), outBuffer.Data(), outBuffer.Rows(), outBuffer.Stride(), outBuffer.Stride());
 #ifdef DEBUG
             dbg.debugPrint("LayerNorm after attention: [%d, %d] (%d)\n", outBuffer.Rows(), outBuffer.Cols(),
                     outBuffer.Stride());
@@ -1154,7 +1189,7 @@ protected:
     QKPO_CLS qkpo;
 
     // layerNorm param
-    NORM_CLS norm;
+    NORM_CLS *norm;
     int layerId;
 
     // Alibi Slopes

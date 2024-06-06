@@ -23,7 +23,7 @@
 #include "debugger.h"
 #include "decoder_util.h"
 #include "matmul_helper.h"
-#include "rmsnorm_kernels.h"
+#include "rms_norm.h"
 #include "simple_mem_pool.h"
 #include "singleton.h"
 #include "timeline.h"
@@ -38,12 +38,10 @@
 // def forward(self, x):
 //         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 // But please also be noted: we extended the MLP to include layer norm
-template <typename WeiT, typename InT = float, typename ImT = float, typename OutT = float>
-class LlamaMLP : public SingletonBase<LlamaMLP<WeiT>> {
+template <typename WeiT, typename InT = float, typename ImT = float, typename OutT = float, typename NORM_CLS = xft::RmsNorm>
+class LlamaMLP {
 public:
-    LlamaMLP() {}
-
-    LlamaMLP(DecoderContext *ctx) {}
+    LlamaMLP(DecoderContext *ctx) { norm = new NORM_CLS(ctx); }
 
     // OriWeiT: float, int8_t or uint4x2_t
     template <typename OriWeiT>
@@ -61,7 +59,6 @@ public:
         xft::Matrix<WeiT> quantizedGateWeight, quantizedUpWeight, quantizedDownWeight;
 
         auto it = SplitUtil::getTaskRange(imSize, ctx->numSplit, ctx->splitIdx);
-        downWeight.Resize(it.second - it.first, hiddenSize);
 
         ctx->mmHelper->convertWeight(ctx, trans, hiddenSize, imSize, gateW, gateS, gateZ, true, quantizedGateWeight,
                 gateWeightScale, gateWeightZero, gateWeightSum);
@@ -80,13 +77,39 @@ public:
                     catWeightsSum);
             quantizedGateWeight.Release();
             quantizedUpWeight.Release();
+
+#ifdef GPU
+            xft::Matrix<WeiT> catWeightsT;
+            int catWeiRows = quantizedCatWeights.Rows();
+            int catWeiCols = quantizedCatWeights.Cols();
+            catWeightsT.Resize(catWeiRows, catWeiCols);
+            ctx->mmHelper->transposeWeight(true, quantizedCatWeights, catWeightsT);
+
+            WeiT *catWeiData = (WeiT *)xft::alloc(catWeiRows * catWeiCols * sizeof(WeiT), ctx->device);
+            catWeights.Assign(catWeiData, catWeiRows, catWeiCols, catWeiCols);
+            xft::memcopy(catWeights.Data(), catWeightsT.Data(), catWeiRows * catWeiCols * sizeof(WeiT), ctx->device);
+#else
             catWeights.Resize(quantizedCatWeights.Rows(), quantizedCatWeights.Cols());
             ctx->mmHelper->packWeight(trans, quantizedCatWeights, catWeights);
+#endif
         }
         // Horizontally split the down weight
         ctx->mmHelper->convertWeight(ctx, trans, imSize, hiddenSize, downW, downS, downZ, false, quantizedDownWeight,
                 downWeightScale, downWeightZero, downWeightSum);
+#ifdef GPU
+        xft::Matrix<WeiT> downWeightT;
+        int downWeiRows = it.second - it.first;
+        int downWeiCols = hiddenSize;
+        downWeightT.Resize(downWeiRows, downWeiCols);
+        ctx->mmHelper->transposeWeight(true, quantizedDownWeight, downWeightT);
+
+        WeiT *downWeiData = (WeiT *)xft::alloc(downWeiRows * downWeiCols * sizeof(WeiT), ctx->device);
+        downWeight.Assign(downWeiData, downWeiRows, downWeiCols, downWeiCols);
+        xft::memcopy(downWeight.Data(), downWeightT.Data(), downWeiRows * downWeiCols * sizeof(WeiT), ctx->device);
+#else
+        downWeight.Resize(it.second - it.first, hiddenSize);
         ctx->mmHelper->packWeight(trans, quantizedDownWeight, downWeight);
+#endif
 
 #ifdef DEBUG
         dbg.debugPrint("quantizedGateWeight:\n");
@@ -100,10 +123,7 @@ public:
 #endif
 
         // LlamaRMSNorm
-        if (normW) {
-            normWeight.Resize(hiddenSize);
-            memcpy(normWeight.Data(), normW, sizeof(float) * hiddenSize);
-        }
+        if (normW) { norm->setWeight(normW, nullptr, hiddenSize); }
     }
 
 #ifdef DEBUG
@@ -126,8 +146,7 @@ public:
                 (ImT *)ctx->normBuf.Data(), ctx->normBuf.Rows(), ctx->normBuf.Cols(), ctx->normBuf.Stride());
 
         if (doLnBefore == true) {
-            xft::rmsNorm(normBuffer.Data(), inBuffer.Data(), normWeight.Data(), M, hiddenSize, inBuffer.Stride(),
-                    normBuffer.Stride(), 1e-6);
+            norm->forward(inBuffer.Data(), normBuffer.Data(), M, inBuffer.Stride(), normBuffer.Stride(), 1e-6);
         }
 
 #ifdef DEBUG
@@ -364,7 +383,7 @@ protected:
     xft::Vector<float> downWeightSum; // For int8_t weight
 
     // LlamaRMSNorm param
-    xft::Vector<float> normWeight;
+    NORM_CLS *norm;
 
 #ifdef DEBUG
     Debugger dbg;

@@ -114,7 +114,8 @@ struct DecoderContext {
     xft::Matrix<float> qkvMatMul; // query, key, value
     xft::Matrix<float> imOut; // intermediate output
 
-    MMHelper *mmHelper;
+    MMHelper *mmHelper = nullptr;
+    void *device = nullptr;
 
     std::string configPath;
     INIReader configReader;
@@ -244,8 +245,12 @@ public:
     bool cached(const std::string &name) { return SimpleMemPool::instance().cached(name); }
 
     template <typename T>
-    T *getBuffer(const std::string &name, size_t size, size_t alignment = 64) {
-        return (T *)SimpleMemPool::instance().getBuffer(name, sizeof(T) * size, alignment);
+    T *getBuffer(const std::string &name, size_t size, void *device = nullptr, size_t alignment = 64) {
+        return (T *)SimpleMemPool::instance().getBuffer(name, sizeof(T) * size, device, alignment);
+    }
+
+    void freeBuffer(const std::string &name, void *device = nullptr) {
+        SimpleMemPool::instance().freeBuffer(name, device);
     }
 
     void dump() {
