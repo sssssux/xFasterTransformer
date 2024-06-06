@@ -71,9 +71,9 @@ struct MlpTypeExtractor<ChatGLM2MLP<WeiT, InT, ImT, OutT, NORM_CLS, true>> {
 };
 
 /*
-Pipeline parallel and tensor parallel introduction:
+Pipeline parallel and tensor parallel introduction with token split disabled:
 
-  1) MPI_Instances = 16,XFT_PIPELINE_STAGE = 4  =>  ctx->ppSize = 4, ctx->tpSize = 4
+  1) MPI_Instances = 16,XFT_PIPELINE_STAGE = 4,XFT_TOKEN_SPLIT_WISE = 0  =>  ctx->ppSize = 4, ctx->tpSize = 4, ctx->tsSize=1
   2) TP sync by oneCCL(row_comm) or shared_memory
   3) PP sync by MPI MPI_COMM_WORLD
 
@@ -143,6 +143,24 @@ Pipeline parallel and tensor parallel introduction:
             │
             ▼
          Output
+
+Pipeline parallel and tensor parallel introduction with token split enabled:
+
+  1) MPI_Instances = 16,XFT_PIPELINE_STAGE = 4,XFT_TOKEN_SPLIT_WISE = 1  =>  ctx->ppSize = 4, ctx->tpSize = 2, ctx->tsSize=2
+  2) TP sync by oneCCL(row_comm) or shared_memory
+  3) PP sync by MPI MPI_COMM_WORLD for layers input/outputs
+  4) TS sync by MPI MPI_COMM_WORLD for KV-Cache transferring
+
+  World Rank:      => Row Rank:       => Rank:     tp0 tp1
+  [ 0,  1,            [[ 0, 1];          ts0 pp0 [  0,  1];      
+    2,  3,             [ 0, 1];          ts0 pp1 [  0,  1];
+    4,  5,             [ 0, 1];          ts0 pp2 [  0,  1];
+    6,  7,             [ 0, 1]];         ts0 pp3 [  0,  1];
+    8,  9,            [[ 0, 1];          ts1 pp0 [  0,  1];
+   10, 11,             [ 0, 1];          ts1 pp1 [  0,  1];
+   12, 13,             [ 0, 1];          ts1 pp2 [  0,  1];
+   14, 15];            [ 0, 1]]          ts1 pp3 [  0,  1];
+
 */
 
 // Template parameters:
@@ -329,11 +347,11 @@ public:
         int *positionIds = this->getPositionIds(ids, batchSize, inputSeqLen, step + this->prefixSharing);
         t1.release();
 
-#ifdef PIPELINE_PARALLEL
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
         // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
         if (ctx->ppSize > 1 && ctx->ppRank > 0) {
-            int curr_world_rank = ctx->ppRank * ctx->tpSize + ctx->tpRank;
-            int prev_world_rank = (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
+            int curr_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
             int count = batchSize * inputSeqLen * hiddenSize;
             int32_t sequenceID;
             MPI_Recv(&sequenceID, 1, MPI_INT32_T, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -368,8 +386,25 @@ public:
             runningTask = TaskWaitingQueue::getInstance().pop();
             sequenceID = runningTask->get(0)->getSequenceID();
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".Step");
+        }
 #endif
 
+// #ifdef TOKEN_SPLIT_INFER
+//         // if current token split is at 2nd+ token, receive KV-Cache from tsRank=0
+//         if (ctx->tsSize > 1 && ctx->tsRank > 0) {
+//             int prev_ts_rank = ctx->ppRank * ctx->tpSize + ctx->tpRank;
+//             int hiddenSize = ctx->hiddenSize;
+//             int kv_count = 0; // how to get size?
+//             int layers_per_pp_stage = this->decoders.size();
+//             for (int i = 0; i < layers_per_pp_stage; ++i) {
+//                 // how to get KVCache?
+//                 KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
+//                 KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
+//                 MPI_Recv(presentKey, kv_count, MPI_FLOAT, prev_ts_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+//                 MPI_Recv(presentValue, kv_count, MPI_FLOAT, prev_ts_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+//             }
+//         }
+// #endif
         // Decoder: forward
         int layers_per_pp_stage = decoderBlock->size();
         for (int i = 0; i < layers_per_pp_stage; ++i) {
@@ -423,13 +458,11 @@ public:
             }
         }
 
-#ifdef PIPELINE_PARALLEL
-        }
-
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
         // If current pipeline stage isn't the end of stage, should send data to next stage and return nullptr
         if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Send");
-            int next_world_rank = (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
+            int next_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
             int count = batchSize * inputSeqLen * hiddenSize;
             MPI_Send(&sequenceID, 1, MPI_INT32_T, next_world_rank, next_world_rank, MPI_COMM_WORLD);
             MPI_Send(embBuf, count, MPI_FLOAT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
@@ -439,6 +472,21 @@ public:
         }
 #endif
 
+// #ifdef TOKEN_SPLIT_INFER
+//         // if current token split is at 2nd+ token, receive KV-Cache from tsRank=0
+//         if (ctx->tsSize > 1 && ctx->tsRank == 0) {
+//             int next_ts_rank = (ctx->tsRank + 1) * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+//             int hiddenSize = ctx->hiddenSize;
+//             int kv_count = 0; // how to get size?
+//             int layers_per_pp_stage = this->decoders.size();
+//             for (int i = 0; i < layers_per_pp_stage; ++i) {
+//                 KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
+//                 KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
+//                 MPI_Send(presentKey, kv_count, MPI_FLOAT, next_ts_rank, next_ts_rank, MPI_COMM_WORLD);
+//                 MPI_Send(presentValue, kv_count, MPI_FLOAT, next_ts_rank, next_ts_rank, MPI_COMM_WORLD);
+//             }
+//         }
+// #endif
         // Prepare input for final Layer Norm (only care about the last row of the result)
         // Shape of embBuf: (bs, seqLen, hiddenSize)
         MlpOutT *lnIn = embBuf;
@@ -723,16 +771,19 @@ protected:
             int embeddingSize, int maxPositions, int maxPosEmbed, int maxSeqLength, bool useLogN, bool useNTK,
             RopeParams *ropeParamsPtr) {
         Env &env = Env::getInstance();
+        int tsSize = env.getTokenSplit();
+        int tsRank = messenger.getSection();
         int tpSize = messenger.getSize();
         int tpRank = messenger.getRank();
         int ppSize = env.getPipelineStage();
         int ppRank = messenger.getColor();
-        // printf("ppSize: %d, ppRank: %d, tpSize: %d, tpRank: %d\n", ppSize, ppRank, tpSize, tpRank);
+        printf("tsSize: %d, tsRank: %d, ppSize: %d, ppRank: %d, tpSize: %d, tpRank: %d\n", tsSize, tsRank, ppSize, ppRank, tpSize, tpRank);
 
         if (context != nullptr) {
             if (context->hiddenSize == hiddenSize && context->attHeadNum == attHeadNum
                     && context->kvHeadNum == kvHeadNum && context->intermediateSize == imSize
-                    && context->tpRank == tpRank) {
+                    && context->tpRank == tpRank && context->ppRank == ppRank
+                    && context->tsRank == tsRank) {
                 return context.get();
             } else {
                 printf("Different context size not unsupported!\n");
@@ -740,8 +791,8 @@ protected:
             }
         } else {
             this->context.reset(new DecoderContext(layers, hiddenSize, headSize, attHeadNum, kvHeadNum, imSize, act,
-                    epsilon, vocabSize, embeddingSize, maxPositions, maxPosEmbed, maxSeqLength, tpRank, tpSize, ppSize,
-                    ppRank, ropeParamsPtr, useLogN, useNTK));
+                    epsilon, vocabSize, embeddingSize, maxPositions, maxPosEmbed, maxSeqLength, tpRank, tpSize, tsSize, 
+                    tsRank, ppSize, ppRank, ropeParamsPtr, useLogN, useNTK));
 
             if (env.getEngineKind() == xft::DeviceKind::iGPU && env.getEngineIndex() < 0) // Sequential assignment
                 this->context->mmHelper = new MMHelper(env.getEngineKind(), ppRank * tpSize + tpRank);
@@ -1107,5 +1158,5 @@ private:
 
 #ifdef DEBUG
     Debugger dbg;
-#endif
+#endif  
 };

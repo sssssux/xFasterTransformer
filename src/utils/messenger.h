@@ -52,7 +52,7 @@ private:
             exit(-1);
         }
 
-        helperInit = (int (*)(int *, int *, int *))dlsym(commHelperHanlde, "init");
+        helperInit = (int (*)(int *, int *, int *, int *))dlsym(commHelperHanlde, "init");
         helperFreePCOMM = (void (*)())dlsym(commHelperHanlde, "freePCOMM");
         helperAllreduce = (void (*)(float *, float *, size_t))dlsym(commHelperHanlde, "allreduce");
         helperAllreduceBF16 = (void (*)(bfloat16_t *, bfloat16_t *, size_t))dlsym(commHelperHanlde, "allreduceBF16");
@@ -68,8 +68,9 @@ private:
 
         atexit(Messenger::mpi_finalize);
 
-        color = Env::getInstance().getPipelineStage();
-        int sameHostnames = (*helperInit)(&size, &rank, &color);
+        color = Env::getInstance().getPipelineStage(); // initialized with pipeline parallel size
+        section = Env::getInstance().getTokenSplit();    // initialized with token split size
+        int sameHostnames = (*helperInit)(&size, &rank, &color, &section);
 
 #ifdef USE_SHM
         if (sameHostnames && !Env::getInstance().getOneCCLEnabled()) {
@@ -102,6 +103,8 @@ public:
     int getSize() { return size; }
 
     int getColor() { return color; }
+
+    int getSection() { return section; }
 
     template <typename T>
     void reduceAdd(T *sendBuf, T *recvBuf, size_t count) {
@@ -259,13 +262,14 @@ private:
     int size;
     int rank;
     int color; // Processes with the same color will be placed into the same sub-communicator
+    int section;
     bool localRanksFlag;
 
 #ifdef USE_SHM
     ShmReduction *pshm;
 #endif
     void *commHelperHanlde;
-    int (*helperInit)(int *, int *, int *);
+    int (*helperInit)(int *, int *, int *, int *);
     void (*helperFreePCOMM)();
     void (*helperAllreduce)(float *, float *, size_t);
     void (*helperAllreduceBF16)(bfloat16_t *, bfloat16_t *, size_t);

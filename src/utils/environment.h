@@ -44,6 +44,8 @@ public:
     // get Engine Kind and Index
     int getMaxRequestNum() { return maxRequestNumValue; }
 
+    int getTokenSplit() { return tokenSplitValue; }
+
     // get AMX Threshold M
     int getAMXThresholdM() { return AMXThresholdMValue; }
 
@@ -78,6 +80,9 @@ private:
 
         // init Max request number
         initMaxRequestNum();
+
+        // init Token Split-wise
+        initTokenSplit();
 
         // init Engine Kind and Index
         initEngineKindIndex();
@@ -191,6 +196,25 @@ private:
                 printf("[ERROR] XFT_MAX_REQUEST_NUM value need to be greater than 0.\n");
         } else {
             maxRequestNumValue = 1;
+        }
+    }
+
+    // Token Split-wise, tokenSplitValue = 1 (XFT_TOKEN_SPLIT_WISE=0), tokenSplitValue = 2 (XFT_TOKEN_SPLIT_WISE=1)
+    int tokenSplitValue = 1;
+    void initTokenSplit() {
+        char *xft_token_split_enabled = getenv("XFT_TOKEN_SPLIT_WISE");
+        if (xft_token_split_enabled != NULL) {
+#ifdef TOKEN_SPLIT_INFER
+            int value = atoi(xft_token_split_enabled);
+            if (value == 0 || value == 1)
+                tokenSplitValue = value + 1;
+            else
+                printf("[ERROR] XFT_TOKEN_SPLIT_WISE value needs to be either 0 (disabled) or 1 (enabled).\n");
+#else
+            printf("[WARNING] XFT_TOKEN_SPLIT_WISE needs to build with WITH_TOKEN_SPLIT_INFER=ON.\n");
+#endif
+        } else {
+            tokenSplitValue = 1;
         }
     }
 

@@ -20,22 +20,31 @@ static ccl::communicator *pcomm;
 
 // world_color is initialized to pipeline_parallel_stages_num(pp_size)
 // and will be re-assign to world_color of MPI == ppRank
-extern "C" int init(int *world_size, int *world_rank, int *world_color) {
+// world_section is initialized to token_split_value(tsSize)
+// and will be re-assign to world_color of MPI == tsRank
+extern "C" int init(int *world_size, int *world_rank, int *world_color, int *world_section) {
     ccl::init();
 
     MPI_Init(NULL, NULL);
     MPI_Comm_size(MPI_COMM_WORLD, world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, world_rank);
 
-    // world_color = world_rank / tpSize = world_rank / (world_size / ppSize)
-    // like: world_color = 0~7 / (8 / 4), XFT_PIPELINE_STAGE = ppSize = 4; tpSize = 2
-    //       world_rank = 0, 1,  ->  world_color = ppRank = 0, 0,  ->  tpRank = 0, 1;
-    //                    2, 3,                             1, 1,               0, 1;
-    //                    4, 5,                             2, 2,               0, 1;
-    //                    6, 7;                             3, 3;               0, 1;
-    *world_color = *world_rank / (*world_size / *world_color);
+    int tsSize = *world_section;
+    int ppSize = *world_color;
+    int tpSize = *world_size / ppSize / tsSize;
+
+    // world_section = world_rank / (pp_size * tp_size) 
+    // world_color = (world_rank / tp_size ) % pp_size 
+    *world_section = *world_rank / (ppSize * tpSize);
+    *world_color = (*world_rank / tpSize) % ppSize;
+
+    // Split MPI_COMM_WORLD into sections
+    MPI_Comm sec_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, *world_section, *world_rank, &sec_comm);
+
+    // Split each section into rows
     MPI_Comm row_comm;
-    MPI_Comm_split(MPI_COMM_WORLD, *world_color, *world_rank, &row_comm);
+    MPI_Comm_split(sec_comm, *world_color, *world_rank, &row_comm);
 
     int row_size, row_rank;
     MPI_Comm_size(row_comm, &row_size);
@@ -52,7 +61,7 @@ extern "C" int init(int *world_size, int *world_rank, int *world_color) {
         MPI_Bcast((void *)mainAddr.data(), mainAddr.size(), MPI_BYTE, 0, row_comm);
         kvs = ccl::create_kvs(mainAddr);
     }
-
+    // guarantee ccl not across Token_split // pipeline parallel groups.
     pcomm = new ccl::communicator(ccl::create_communicator(row_size, row_rank, kvs));
 
     *world_size = pcomm->size();

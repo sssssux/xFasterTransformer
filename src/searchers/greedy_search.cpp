@@ -42,7 +42,7 @@ std::vector<int> GreedySearch::syncToken(std::tuple<float *, int, int> &result) 
         this->nextTokens = std::vector<int>(batchSize, 0);
         if (ctx->ppSize > 1 && ctx->ppRank == 0 && enabledBackgroundSync == false) {
             enabledBackgroundSync = true;
-            int predictor_world_rank = (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
+            int predictor_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
             ThreadPool::getInstance().addTask([predictor_world_rank, this] {
                 while (true) {
                     int32_t sequenceID;
@@ -65,8 +65,8 @@ std::vector<int> GreedySearch::syncToken(std::tuple<float *, int, int> &result) 
         this->nextTokens = this->search(result);
         if (ctx->ppSize > 1 && ctx->ppRank == ctx->ppSize - 1) {
             TimeLine t("GreedySearch.Seq" + std::to_string(ctx->sequenceID) + ".MPI_Send");
-            int embedding_world_rank = 0 * ctx->tpSize + ctx->tpRank;
-            int predictor_world_rank = (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
+            int embedding_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + 0 * ctx->tpSize + ctx->tpRank;
+            int predictor_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
             MPI_Send(&ctx->sequenceID, 1, MPI_INT32_T, embedding_world_rank, predictor_world_rank, MPI_COMM_WORLD);
             MPI_Send(this->nextTokens.data(), batchSize, MPI_INT32_T, embedding_world_rank, predictor_world_rank,
                     MPI_COMM_WORLD);

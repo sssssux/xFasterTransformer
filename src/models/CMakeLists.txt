@@ -19,7 +19,7 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} MODEL_SRCS)
 add_library(models OBJECT ${MODEL_SRCS})
 add_dependencies(models utils)
 
-if(WITH_PIPELINE_PARALLEL)
+if(WITH_PIPELINE_PARALLEL OR WITH_TOKEN_SPLIT_INFER)
     find_package(MPI REQUIRED)
     include_directories(${MPI_INCLUDE_PATH})
     add_definitions(${MPI_CXX_COMPILE_FLAGS})
