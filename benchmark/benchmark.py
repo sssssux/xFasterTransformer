@@ -160,13 +160,13 @@ if __name__ == "__main__":
             tokenizer.pad_token_id = 0
         tokenizer.pad_token = tokenizer.decode([tokenizer.pad_token_id])
         print(f"[INFO] set pad_token_id as {tokenizer.pad_token_id}")
-        
+
     try:
         import xfastertransformer
 
         print("[INFO] xfastertransformer is installed, using pip installed package.")
     except Exception as e:
-        sys.path.append("../src")
+        sys.path.append("../src/")
         import xfastertransformer
 
         print("[INFO] xfastertransformer is not installed in pip, using source code.")
@@ -236,6 +236,7 @@ if __name__ == "__main__":
                 cost_list.append(next_time)
                 token_list.append(next_tokens.view(-1).tolist()[0])
             generated_ids = model.finalize()
+            print("Output token Length is", len(cost_list)+1)
             total_times.append(first_token_time + sum(cost_list))
             next_token_times += cost_list
             response = tokenizer.decode(token_list, skip_special_tokens=True)

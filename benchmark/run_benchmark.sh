@@ -250,20 +250,11 @@ elif [[ "${numa_nodes}" -eq 4 ]] && [[ "${sockets_num}" -eq 4 ]]; then
     Info "#SPR-SP 4-socket Quad mode"
     export OMP_NUM_THREADS=$((${cores_per_numa} / 2))
     Info "OMP_NUM_THREADS: $((${cores_per_numa} / 2))"
-    run_cmd="mpirun \
-    -n 1 bash run.sh 0 0 ${OMP_NUM_THREADS} 0"
-    if [ "$sockets" == "2" ]; then
-        run_cmd+=" : \
-        -n 1 bash run.sh 1 1 ${OMP_NUM_THREADS} 1"
-    fi
-    if [ "$sockets" == "3" ]; then
-        run_cmd+=" : \
-        -n 1 bash run.sh 2 2 ${OMP_NUM_THREADS} 2"
-    fi
-    if [ "$sockets" == "4" ]; then
-        run_cmd+=" : \
-        -n 1 bash run.sh 3 3 ${OMP_NUM_THREADS} 3"
-    fi
+    run_cmd="mpirun "
+    for ((i=0; i<$sockets; i++)); do
+        run_cmd+="-n 1 bash run.sh $i $i ${OMP_NUM_THREADS} $i : "
+    done 
+    run_cmd=${run_cmd::-3}  # remove the last ' : ' from the command string   
 elif [ "${numa_nodes}" -eq 2 ]; then
     #SPR or hbm only or hbm cache Quad-mode or EMR non SNC-2 mode, Confirm that there are 2 DRAM memory nodes through "nuamctl -H"
     Info "Quad mode"
