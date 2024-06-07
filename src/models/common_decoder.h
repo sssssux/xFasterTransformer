@@ -332,6 +332,10 @@ public:
         this->accSeqLen += seqLen;
 
 #ifdef DEBUG
+        dbg.debugPrint("step: %d \n", step);
+#endif
+
+#ifdef DEBUG
         dbg.debugPrint("---- embedding.forward ----\n");
         dbg.debugPrint("ids:\n");
         dbg.dumpMatrix(ids, batchSize, inputSeqLen, inputSeqLen);
@@ -354,9 +358,18 @@ public:
             int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
             int count = batchSize * inputSeqLen * hiddenSize;
             int32_t sequenceID;
+#if defined(DEBUG) 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receiving sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank);
+#endif
             MPI_Recv(&sequenceID, 1, MPI_INT32_T, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Recv");
+#if defined(DEBUG)
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied sequenceID %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, sequenceID);
+#endif
             MPI_Recv(embBuf, count, MPI_FLOAT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#if defined(DEBUG) 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied embBuf count %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, count);
+#endif
             // TODO: Error: different scope when dynamic loading so file
             // this->messenger.worldRecvFP32(embBuf, count, prev_world_rank, curr_world_rank);
             if (!SequencePool::getInstance().has(sequenceID)) {
@@ -368,16 +381,26 @@ public:
             TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(sequenceID));
         }
 
+        // world_rank = 0 enabled inputQueue not empty
         if (!InputQueue::getInstance().empty()) {
             if (!TaskWaitingQueue::getInstance().isFull()) {
                 auto *groupMeta = InputQueue::getInstance().pop();
                 groupMeta->get(0)->setPastSeqLen(pastSeqLen);
                 groupMeta->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
                 SequencePool::getInstance().add(groupMeta);
+#if defined(DEBUG) 
+                int sequenceID = groupMeta->get(0)->getSequenceID();
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, TaskWaitingQueue not full sequenceID %d.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, sequenceID);
+#endif
                 TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(groupMeta->get(0)->getSequenceID()));
+#if defined(DEBUG) 
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, TaskWaitingQueue empty?? %d.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, TaskWaitingQueue::getInstance().empty());
+#endif
             }
         }
-
+#if defined(DEBUG) 
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, InputQueue not empty.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
+#endif
         while (TaskWaitingQueue::getInstance().empty());
 
         SequenceGroupMeta *runningTask = nullptr;
@@ -385,6 +408,9 @@ public:
         if (!TaskWaitingQueue::getInstance().empty()) {
             runningTask = TaskWaitingQueue::getInstance().pop();
             sequenceID = runningTask->get(0)->getSequenceID();
+#if defined(DEBUG) 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, TaskWaitingQueue !empty sequenceID %d.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, sequenceID);
+#endif
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".Step");
         }
 #endif
@@ -406,6 +432,9 @@ public:
 //         }
 // #endif
         // Decoder: forward
+#if defined(DEBUG) 
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, forwarding\n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
+#endif
         int layers_per_pp_stage = decoderBlock->size();
         for (int i = 0; i < layers_per_pp_stage; ++i) {
             int workers = this->messenger.getSize();
@@ -413,6 +442,9 @@ public:
                 // Expand the prefix KV cache for each batch
                 this->kvCacheMgr->expandPrefixCache(i, userSideBS, this->prefixSeqLen);
             }
+#if defined(DEBUG) 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, forwarding %d th layer\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, i);
+#endif
             KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
             KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
 
@@ -464,8 +496,17 @@ public:
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Send");
             int next_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
             int count = batchSize * inputSeqLen * hiddenSize;
+#if defined(DEBUG) 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, sending sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank);
+#endif
             MPI_Send(&sequenceID, 1, MPI_INT32_T, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#if defined(DEBUG) 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, sequenceID sent %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, sequenceID);
+#endif
             MPI_Send(embBuf, count, MPI_FLOAT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#if defined(DEBUG) 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, embBuf sent %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, count);
+#endif
             // TODO: Error: different scope when dynamic loading so file
             // this->messenger.worldSendFP32(embBuf, count, next_world_rank, next_world_rank);
             return std::tuple<float *, int, int>(nullptr, 0, 0);
@@ -777,8 +818,9 @@ protected:
         int tpRank = messenger.getRank();
         int ppSize = env.getPipelineStage();
         int ppRank = messenger.getColor();
+#ifdef DEBUG
         printf("tsSize: %d, tsRank: %d, ppSize: %d, ppRank: %d, tpSize: %d, tpRank: %d\n", tsSize, tsRank, ppSize, ppRank, tpSize, tpRank);
-
+#endif
         if (context != nullptr) {
             if (context->hiddenSize == hiddenSize && context->attHeadNum == attHeadNum
                     && context->kvHeadNum == kvHeadNum && context->intermediateSize == imSize

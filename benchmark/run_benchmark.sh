@@ -62,12 +62,12 @@ while [ -n "$1" ]; do
         ;;
     -s | --sockets)
         case $2 in
-        "1" | "2")
+        "1" | "2" | "4")
             sockets=$2
             shift 2
             ;;
         *)
-            Error "sockets must in 1 or 2."
+            Error "sockets must in 1, 2 or 4."
             exit 1
             ;;
         esac

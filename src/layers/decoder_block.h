@@ -34,6 +34,10 @@ public:
 
         int layersOnDuty = layers / ctx->ppSize;
         int startLayer = ctx->ppRank * layersOnDuty;
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
+        printf("layersOnDuty %d, startLayer %d\n", layersOnDuty, startLayer);
+#endif
         for (int i = startLayer; i < startLayer + layersOnDuty; ++i) {
             auto pdec = new DECODER(ctx, i);
             if (dt == xft::DataType::int8) {
@@ -48,6 +52,9 @@ public:
             }
             this->decoders.push_back(pdec);
         }
+#ifdef DEBUG
+        printf("ppRank %d Decoder Weights loaded\n", ctx->ppRank);
+#endif
     }
 
     virtual ~DecoderBlock() {
