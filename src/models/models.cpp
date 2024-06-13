@@ -818,35 +818,46 @@ std::tuple<float *, int, int> Model::forward(bool logits_all) {
 // and all sequences are all prompts(step==0) or all decodes(step>0)
 std::vector<int32_t> Model::generate() {
     // TODO: Deprecate the following Path
-#if defined(DEBUG)
-    DecoderContext *ctx = decoder->getContext();
-    printf("tsRank: %d, ppRank: %d, tpRank: %d, generate searcher %p  \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, searcher);
-#endif
     if (searcher != nullptr) {
         if (inputIds.empty()) {
             printf("Please set input tokens by model.input().\n");
             exit(-1);
         }
+
+#ifdef TOKEN_SPLIT_INFER
+        DecoderContext *ctx = decoder->getContext();
         if (isNewInput) {
-#if defined(DEBUG)
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, isNewInput \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
-#endif
+            isNewInput = false;
+            // ppRank == 0 push inputQueue
+            int seqLen = inputIds.size() / batchSize;
+            if (ctx->ppSize > 1 && ctx->ppRank == 0 ) {
+                isNewInput = false;
+                int *ids = inputIds.data();
+                std::vector<int32_t> inputTokens(seqLen);
+                for (int i = 0; i < batchSize; ++i) {
+                    // st batch index i sequence to inputTokens
+                    std::copy(ids + i * seqLen, ids + (i + 1) * seqLen, std::back_inserter(inputTokens));
+                    auto *group = SequencePool::getInstance().newGroupMeta(inputTokens);
+                    InputQueue::getInstance().push(group);
+                }
+            }
+            return searcher->getNextToken(inputIds.data(), batchSize, seqLen);
+        }else {
+            return searcher->getNextToken();
+        }
+#else
+        if (isNewInput) {
             isNewInput = false;
             return searcher->getNextToken(inputIds.data(), batchSize, inputIds.size() / batchSize);
         } else {
-#if defined(DEBUG)
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, not isNewInput \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
-#endif
             return searcher->getNextToken();
         }
+#endif
     } else {
         // TODO
         // Assume that all sequences in the group are all prompts or all decodes.
         // Prepare input data for the decoder.
         std::vector<SequenceMeta *> workingSeqs;
-#if defined(DEBUG)
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, pushing workingSeqs \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
-#endif
         for (auto x : workingGroup) {
             workingSeqs.push_back(x->get(0));
             if (x->getGroupSize() > 1 && x->getStep() > 1) {
@@ -855,22 +866,13 @@ std::vector<int32_t> Model::generate() {
                 }
             }
         }
-#if defined(DEBUG)
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, workingSeqs forwarding \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
-#endif
         std::tuple<float *, int, int> result = decoder->forward(workingSeqs, false);
-#if defined(DEBUG)
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, workingSeqs forwarded \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
-#endif
         float *outBuf = std::get<0>(result);
         int sampleOffset = std::get<1>(result);
         int sampleSize = std::get<2>(result);
 
         // Assume all gen kwargs in the batch are the same
         auto &config = workingGroup[0]->getSamplingMeta()->config;
-#if defined(DEBUG)
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, numBeams%d doSample%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, config.numBeams, config.doSample);
-#endif
         if (config.numBeams != 1) {
             // TODO: BeamSearch
             throw std::logic_error("Beam Search Method not implemented");

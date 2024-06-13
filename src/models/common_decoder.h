@@ -324,9 +324,28 @@ public:
             prepareBuffers(ctx, userSideBS, beamSize, logitsAll);
         }
 
+
         AttnInT *embBuf = (AttnInT *)actBuffers->Data();
         MlpOutT *outBuf = (MlpOutT *)(embBuf + batchSize * inputSeqLen * hiddenSize);
 
+#ifdef TOKEN_SPLIT_INFER
+        if (ctx->tsRank == 1 && step == 0) {
+            if (!InputQueue::getInstance().empty()) {
+                if (!TaskWaitingQueue::getInstance().isFull()) {
+                    auto *groupMeta = InputQueue::getInstance().pop();
+                    groupMeta->get(0)->setPastSeqLen(pastSeqLen);
+                    groupMeta->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
+                    SequencePool::getInstance().add(groupMeta);
+                    int32_t sequenceID = groupMeta->get(0)->getSequenceID();
+#ifdef DEBUG
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, add sequenceID %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, sequenceID);
+#endif
+                } 
+            }
+            return std::tuple<float *, int, int>(nullptr, 0, 0);
+        }
+
+#endif
         // Embedding
         this->embeddingForward(ids, embBuf, batchSize * inputSeqLen);
         this->accSeqLen += seqLen;
@@ -351,6 +370,59 @@ public:
         int *positionIds = this->getPositionIds(ids, batchSize, inputSeqLen, step + this->prefixSharing);
         t1.release();
 
+#ifdef TOKEN_SPLIT_INFER
+        if (ctx->tsSize > 1 && ctx->tsRank != 0 && step == 1) {
+            int prev_world_rank = (ctx->tsRank - 1) * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int curr_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int32_t sequenceID;
+#ifdef DEBUG 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, receiving sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank);
+#endif
+            MPI_Recv(&sequenceID, 1, MPI_INT32_T, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            int layers_per_pp_stage = decoderBlock->size();
+            KVCacheTensor<KVCacheT> &firstKey = this->kvCacheMgr->getKey(0);
+            uint64_t max_kvCount = firstKey.getAllocSize();
+            MPI_Datatype mpiType;
+            uint64_t mpi_count = 0;
+            switch (getDataType<KVCacheT>()) {
+                case DataType::int8: 
+                    mpiType = MPI_BYTE; mpi_count = max_kvCount; break;
+                case DataType::fp16:
+                    mpiType = MPI_FLOAT;
+                    mpi_count = max_kvCount / 2;
+                    break;
+                default: 
+                    mpiType = MPI_FLOAT; mpi_count = max_kvCount; break;
+            }
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d max_kvCount %ld, mpi_count %ld.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, max_kvCount, mpi_count);
+            KVCacheT *temp_buffer = new KVCacheT[max_kvCount];
+            for (int i = 0; i < layers_per_pp_stage; ++i) {
+                KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
+                KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
+
+                MPI_Recv(temp_buffer, mpi_count, mpiType, prev_world_rank, sequenceID, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                presentKey.setData(temp_buffer, max_kvCount);
+#ifdef DEBUG
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, receive KVCacheTensor presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
+#endif
+                MPI_Recv(temp_buffer, mpi_count, mpiType, prev_world_rank, sequenceID, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                presentValue.setData(temp_buffer, max_kvCount);
+#ifdef DEBUG
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, receive KVCacheTensor presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
+#endif
+#ifdef DEBUG
+                if ( i == 0 ){
+                    dbg.debugPrint(">> Recv KVCacheTensor presentKey: [%d layer %ld] :\n", i, max_kvCount);
+                    dbg.dumpMatrix(presentKey.getData(), 1, 8192, 1024, true);
+                    dbg.debugPrint(">> Recv KVCacheTensor presentValue: [%d layer %ld] :\n", i, max_kvCount);
+                    dbg.dumpMatrix(presentValue.getData(), 1, 8192, 1024, true);
+                }
+#endif
+            }
+            delete[] temp_buffer;
+        }
+#endif
+
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
         // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
         if (ctx->ppSize > 1 && ctx->ppRank > 0) {
@@ -358,21 +430,22 @@ public:
             int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
             int count = batchSize * inputSeqLen * hiddenSize;
             int32_t sequenceID;
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receiving sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank);
 #endif
             MPI_Recv(&sequenceID, 1, MPI_INT32_T, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Recv");
-#if defined(DEBUG)
+#ifdef DEBUG
             printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied sequenceID %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, sequenceID);
 #endif
             MPI_Recv(embBuf, count, MPI_FLOAT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied embBuf count %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, count);
 #endif
             // TODO: Error: different scope when dynamic loading so file
             // this->messenger.worldRecvFP32(embBuf, count, prev_world_rank, curr_world_rank);
             if (!SequencePool::getInstance().has(sequenceID)) {
+                // new a group meta with existing sequence id
                 auto *groupMeta = SequencePool::getInstance().newGroupMeta(sequenceID, seqLen);
                 groupMeta->get(0)->setPastSeqLen(pastSeqLen);
                 groupMeta->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
@@ -380,61 +453,47 @@ public:
             }
             TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(sequenceID));
         }
+#endif
 
-        // world_rank = 0 enabled inputQueue not empty
+
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
         if (!InputQueue::getInstance().empty()) {
             if (!TaskWaitingQueue::getInstance().isFull()) {
                 auto *groupMeta = InputQueue::getInstance().pop();
                 groupMeta->get(0)->setPastSeqLen(pastSeqLen);
                 groupMeta->get(0)->allocBuffer<AttnInT>(hiddenSize, embBuf);
                 SequencePool::getInstance().add(groupMeta);
-#if defined(DEBUG) 
-                int sequenceID = groupMeta->get(0)->getSequenceID();
+#ifdef DEBUG 
+                int32_t sequenceID = groupMeta->get(0)->getSequenceID();
                 printf("tsRank: %d, ppRank: %d, tpRank: %d, TaskWaitingQueue not full sequenceID %d.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, sequenceID);
 #endif
                 TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(groupMeta->get(0)->getSequenceID()));
-#if defined(DEBUG) 
+#ifdef DEBUG 
                 printf("tsRank: %d, ppRank: %d, tpRank: %d, TaskWaitingQueue empty?? %d.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, TaskWaitingQueue::getInstance().empty());
 #endif
             }
         }
-#if defined(DEBUG) 
+
+        while (TaskWaitingQueue::getInstance().empty());
+#ifdef DEBUG 
         printf("tsRank: %d, ppRank: %d, tpRank: %d, InputQueue not empty.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
 #endif
-        while (TaskWaitingQueue::getInstance().empty());
 
         SequenceGroupMeta *runningTask = nullptr;
         int32_t sequenceID = -1;
         if (!TaskWaitingQueue::getInstance().empty()) {
             runningTask = TaskWaitingQueue::getInstance().pop();
             sequenceID = runningTask->get(0)->getSequenceID();
-#if defined(DEBUG) 
+            // set context sequenceID to the current running Task id
+            ctx->sequenceID = sequenceID;
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, TaskWaitingQueue !empty sequenceID %d.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, sequenceID);
 #endif
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".Step");
         }
 #endif
 
-// #ifdef TOKEN_SPLIT_INFER
-//         // if current token split is at 2nd+ token, receive KV-Cache from tsRank=0
-//         if (ctx->tsSize > 1 && ctx->tsRank > 0) {
-//             int prev_ts_rank = ctx->ppRank * ctx->tpSize + ctx->tpRank;
-//             int hiddenSize = ctx->hiddenSize;
-//             int kv_count = 0; // how to get size?
-//             int layers_per_pp_stage = this->decoders.size();
-//             for (int i = 0; i < layers_per_pp_stage; ++i) {
-//                 // how to get KVCache?
-//                 KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
-//                 KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
-//                 MPI_Recv(presentKey, kv_count, MPI_FLOAT, prev_ts_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-//                 MPI_Recv(presentValue, kv_count, MPI_FLOAT, prev_ts_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-//             }
-//         }
-// #endif
         // Decoder: forward
-#if defined(DEBUG) 
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, forwarding\n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
-#endif
         int layers_per_pp_stage = decoderBlock->size();
         for (int i = 0; i < layers_per_pp_stage; ++i) {
             int workers = this->messenger.getSize();
@@ -442,9 +501,10 @@ public:
                 // Expand the prefix KV cache for each batch
                 this->kvCacheMgr->expandPrefixCache(i, userSideBS, this->prefixSeqLen);
             }
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, forwarding %d th layer\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, i);
 #endif
+
             KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
             KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
 
@@ -490,44 +550,76 @@ public:
             }
         }
 
+
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
         // If current pipeline stage isn't the end of stage, should send data to next stage and return nullptr
         if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Send");
             int next_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
             int count = batchSize * inputSeqLen * hiddenSize;
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, sending sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank);
 #endif
             MPI_Send(&sequenceID, 1, MPI_INT32_T, next_world_rank, next_world_rank, MPI_COMM_WORLD);
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, sequenceID sent %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, sequenceID);
 #endif
             MPI_Send(embBuf, count, MPI_FLOAT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, embBuf sent %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, count);
 #endif
             // TODO: Error: different scope when dynamic loading so file
             // this->messenger.worldSendFP32(embBuf, count, next_world_rank, next_world_rank);
-            return std::tuple<float *, int, int>(nullptr, 0, 0);
         }
 #endif
 
-// #ifdef TOKEN_SPLIT_INFER
-//         // if current token split is at 2nd+ token, receive KV-Cache from tsRank=0
-//         if (ctx->tsSize > 1 && ctx->tsRank == 0) {
-//             int next_ts_rank = (ctx->tsRank + 1) * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
-//             int hiddenSize = ctx->hiddenSize;
-//             int kv_count = 0; // how to get size?
-//             int layers_per_pp_stage = this->decoders.size();
-//             for (int i = 0; i < layers_per_pp_stage; ++i) {
-//                 KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
-//                 KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
-//                 MPI_Send(presentKey, kv_count, MPI_FLOAT, next_ts_rank, next_ts_rank, MPI_COMM_WORLD);
-//                 MPI_Send(presentValue, kv_count, MPI_FLOAT, next_ts_rank, next_ts_rank, MPI_COMM_WORLD);
-//             }
-//         }
-// #endif
+#ifdef TOKEN_SPLIT_INFER
+        // if current token split is at 1st token, send KV-Cache to tsRank=1
+        if (ctx->tsSize > 1 && ctx->tsRank == 0 && step == 0) {
+            int next_world_rank = (ctx->tsRank + 1) * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+#ifdef DEBUG 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, sending sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank);
+#endif
+            MPI_Send(&sequenceID, 1, MPI_INT32_T, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+            int layers_per_pp_stage = decoderBlock->size();
+            KVCacheTensor<KVCacheT> &firstKey = this->kvCacheMgr->getKey(0);
+            uint64_t max_kvCount = firstKey.getAllocSize();
+            MPI_Datatype mpiType;
+            switch (getDataType<KVCacheT>()) {
+                case DataType::int8: 
+                    mpiType = MPI_BYTE; break;
+                case DataType::fp16:
+                    mpiType = MPI_FLOAT;
+                    max_kvCount = max_kvCount / 2;
+                    break;
+                default: 
+                    mpiType = MPI_FLOAT; break;
+            }
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_ts_rank %d max_kvCount %ld.\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, max_kvCount);
+            for (int i = 0; i < layers_per_pp_stage; ++i) {
+                KVCacheTensor<KVCacheT> &presentKey = this->kvCacheMgr->getKey(i);
+                KVCacheTensor<KVCacheT> &presentValue = this->kvCacheMgr->getValue(i);
+#ifdef DEBUG
+                if ( i == 0 ){
+                    dbg.debugPrint(">> Send KVCacheTensor presentKey: [%d layer %ld] :\n", i, max_kvCount);
+                    dbg.dumpMatrix(presentKey.getData(), 1, 8192, 1024, true);
+                    dbg.debugPrint(">> Send KVCacheTensor presentValue: [%d layer %ld] :\n", i, max_kvCount);
+                    dbg.dumpMatrix(presentValue.getData(), 1, 8192, 1024, true);
+                }
+#endif
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, next_ts_rank %d, send KVCacheTensor presentKey: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, i, max_kvCount);
+                MPI_Send(presentKey.getData(), max_kvCount, mpiType, next_world_rank, sequenceID, MPI_COMM_WORLD);
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, next_ts_rank %d, send KVCacheTensor presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, i, max_kvCount);
+                MPI_Send(presentValue.getData(), max_kvCount, mpiType, next_world_rank, sequenceID, MPI_COMM_WORLD);
+            }
+        }
+#endif
+
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+        if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {
+            return std::tuple<float *, int, int>(nullptr, 0, 0);
+        }
+#endif
         // Prepare input for final Layer Norm (only care about the last row of the result)
         // Shape of embBuf: (bs, seqLen, hiddenSize)
         MlpOutT *lnIn = embBuf;

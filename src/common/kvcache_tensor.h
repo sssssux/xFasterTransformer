@@ -98,6 +98,7 @@ public:
     int getBatchSize() const { return batchSize; }
     int getHeadNum() const { return headNum; }
     int getHeadSize() const { return headSize; }
+    int getAllocSize() const { return allocSize; }
 
     // Get a vector for a specified sequence, return the start address, and the scale factor
     std::pair<T *, float *> getSequence(int seqIdx, int batchIdx, int headIdx) {
@@ -133,6 +134,17 @@ public:
         }
     }
 
+    T* getData() {
+        return this->data;
+    }
+
+    void setData(T* newData, uint64_t newSize) {
+        if(newSize > allocSize) {
+            printf("New data size exceed allocated size in KV Cache.\n");
+            exit(-1);
+        }
+        memcpy(this->data, newData, newSize * sizeof(T));
+    }
     /**
      * Expand the tensor by broadcasting each sample to multiple beams.
      * It is needed when beam_size > 1 by just passing the unique user side samples to do the inference.

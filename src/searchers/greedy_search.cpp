@@ -32,66 +32,110 @@ GreedySearch::GreedySearch(AbstractDecoder &dec, const SearcherConfig &config)
     stopWordsIndex = {};
 }
 
+void GreedySearch::handleTask(int predictor_world_rank) {
+    ThreadPool::getInstance().addTask([predictor_world_rank, this] {
+        DecoderContext *ctx = decoder.getContext();
+        if (predictor_world_rank != (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank){
+            while (true) {
+                int32_t sequenceID;
+    #ifdef DEBUG
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, receiving sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank);
+    #endif
+                MPI_Recv(&sequenceID, 1, MPI_INT32_T, predictor_world_rank, predictor_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    #ifdef DEBUG 
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, sequenceID received %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank, sequenceID);
+    #endif
+                TimeLine t("GreedySearch.Seq" + std::to_string(sequenceID) + ".MPI_Recv");
+                MPI_Recv(this->nextTokens.data(), this->batchSize, MPI_INT32_T, predictor_world_rank, predictor_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    #ifdef DEBUG 
+                printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, nextTokens received %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank, this->batchSize);
+    #endif
+                if (SequencePool::getInstance().has(sequenceID)) {
+                    auto seq = SequencePool::getInstance().get(sequenceID);
+                    TaskWaitingQueue::getInstance().push(seq);
+                } else {
+                    printf("Error: should have sequenceID\n");
+                    fflush(stdout);
+                }
+            }
+        }else{
+            int32_t sequenceID;
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, receiving sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank);
+#endif
+            MPI_Recv(&sequenceID, 1, MPI_INT32_T, predictor_world_rank, predictor_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, sequenceID received %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank, sequenceID);
+#endif
+            TimeLine t("GreedySearch.Seq" + std::to_string(sequenceID) + ".MPI_Recv");
+            MPI_Recv(this->nextTokens.data(), this->batchSize, MPI_INT32_T, predictor_world_rank, predictor_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, nextTokens received %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank, this->batchSize);
+#endif
+            if (SequencePool::getInstance().has(sequenceID)) {
+                auto seq = SequencePool::getInstance().get(sequenceID);
+                TaskWaitingQueue::getInstance().push(seq);
+            } else {
+                printf("Error: should have sequenceID\n");
+                fflush(stdout);
+            }
+        }
+    });
+}
 std::vector<int> GreedySearch::syncToken(std::tuple<float *, int, int> &result) {
     // send data from last predictor stage to first embedding stage in pipeline parallel
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
     DecoderContext *ctx = decoder.getContext();
     // Messenger &messenger = decoder.getMessenger();
-#if defined(DEBUG)
+#ifdef DEBUG
     printf("tsRank: %d, ppRank: %d, tpRank: %d, syncToken \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
 #endif
     if (std::get<0>(result) == nullptr) { // The first embedding pipeline parallel stage
-#if defined(DEBUG)
+#ifdef DEBUG
         printf("tsRank: %d, ppRank: %d, tpRank: %d, result nullptr, enabledBackgroundSync = %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, enabledBackgroundSync);
 #endif
         this->nextTokens = std::vector<int>(batchSize, 0);
-        if (ctx->ppSize > 1 && ctx->ppRank == 0 && enabledBackgroundSync == false) {
+        if (ctx->ppSize > 1 && ctx->ppRank == 0 && enabledBackgroundSync == false && (ctx->tsSize == 1 or ctx->tsRank == 1)) {
             enabledBackgroundSync = true;
-            int predictor_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
-            ThreadPool::getInstance().addTask([predictor_world_rank, this] {
-                DecoderContext *ctx = decoder.getContext();
-                while (true) {
-                    int32_t sequenceID;
-#if defined(DEBUG)
-                    printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, receiving sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank);
+            int predictor_world_rank;
+            // receive nextToken from 1st token last pp rank
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, setting predictor_world_rank \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
 #endif
-                    MPI_Recv(&sequenceID, 1, MPI_INT32_T, predictor_world_rank, predictor_world_rank, MPI_COMM_WORLD,
-                            MPI_STATUS_IGNORE);
-#if defined(DEBUG) 
-                    printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, sequenceID received %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank, sequenceID);
-#endif
-                    TimeLine t("GreedySearch.Seq" + std::to_string(sequenceID) + ".MPI_Recv");
-                    MPI_Recv(this->nextTokens.data(), this->batchSize, MPI_INT32_T, predictor_world_rank,
-                            predictor_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#if defined(DEBUG) 
-                    printf("tsRank: %d, ppRank: %d, tpRank: %d, predictor_world_rank %d, nextTokens received %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, predictor_world_rank, this->batchSize);
-#endif
-                    if (SequencePool::getInstance().has(sequenceID)) {
-                        auto seq = SequencePool::getInstance().get(sequenceID);
-                        TaskWaitingQueue::getInstance().push(seq);
-                    } else {
-                        printf("Error: should have sequenceID\n");
-                        fflush(stdout);
-                    }
-                }
-            });
+            if (ctx->tsSize > 1){
+                printf("1st handleTask will be called now.\n");
+                predictor_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
+                handleTask(predictor_world_rank); 
+            }
+            // receive nextToken from 2nd+ token last pp rank
+            predictor_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
+            printf("Second handleTask will be called now.\n");
+            handleTask(predictor_world_rank);   
         }
     } else { // The last predictor pipeline parallel stage
         this->nextTokens = this->search(result);
         if (ctx->ppSize > 1 && ctx->ppRank == ctx->ppSize - 1) {
             TimeLine t("GreedySearch.Seq" + std::to_string(ctx->sequenceID) + ".MPI_Send");
-            int embedding_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + 0 * ctx->tpSize + ctx->tpRank;
-            int predictor_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
-#if defined(DEBUG) 
+            int embedding_world_rank = 0;
+            int predictor_world_rank = 0;
+            if (ctx->tsSize >1 && ctx->tsRank == 0){
+                embedding_world_rank = 1 * (ctx->tpSize * ctx->ppSize) + 0 * ctx->tpSize + ctx->tpRank;
+                predictor_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
+            }else{
+                embedding_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + 0 * ctx->tpSize + ctx->tpRank;
+                predictor_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppSize - 1) * ctx->tpSize + ctx->tpRank;
+            }
+            
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, embedding_world_rank %d,  predictor_world_rank %d, sending sequenceID \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, embedding_world_rank, predictor_world_rank);
 #endif
             MPI_Send(&ctx->sequenceID, 1, MPI_INT32_T, embedding_world_rank, predictor_world_rank, MPI_COMM_WORLD);
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, embedding_world_rank %d,  predictor_world_rank %d, sequenceID sent %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, embedding_world_rank, predictor_world_rank, ctx->sequenceID);
 #endif
             MPI_Send(this->nextTokens.data(), batchSize, MPI_INT32_T, embedding_world_rank, predictor_world_rank,
                     MPI_COMM_WORLD);
-#if defined(DEBUG) 
+#ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, embedding_world_rank %d, predictor_world_rank %d, nextTokens sent %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, embedding_world_rank, predictor_world_rank, batchSize);
 #endif
             // TODO: Error: different scope when dynamic loading so file
@@ -113,10 +157,6 @@ std::vector<int> GreedySearch::syncToken(std::tuple<float *, int, int> &result) 
 // Get next tokens accoring to the prompt IDs for first token
 std::vector<int> GreedySearch::getNextToken(int *ids, int batchSize, int seqLen) {
     TimeLine t("1st Token");
-#if defined(DEBUG)
-    DecoderContext *ctx = decoder.getContext();
-    printf("tsRank: %d, ppRank: %d, tpRank: %d, gen 1st token \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
-#endif
     this->step = 0;
     this->batchSize = batchSize;
     this->curLen = seqLen;
@@ -130,18 +170,10 @@ std::vector<int> GreedySearch::getNextToken(int *ids, int batchSize, int seqLen)
     std::copy(ids, ids + batchSize * seqLen, output.begin());
 
     int64_t dims[3] = {batchSize, 1, seqLen};
-#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
-    // ppRank == 0 push inputQueue
-    if (ctx->ppSize > 1 && ctx->ppRank == 0) {
-        std::vector<int32_t> inputTokens(batchSize * seqLen);
-        for (int i = 0; i < batchSize * seqLen; ++i) {
-            inputTokens[i] = ids[i];
-        }
-        auto *groupMeta = SequencePool::getInstance().newGroupMeta(inputTokens);
-        InputQueue::getInstance().push(groupMeta);
-    }
-#endif
-#if defined(DEBUG)
+
+#ifdef DEBUG
+    DecoderContext *ctx = decoder.getContext();
+    printf("tsRank: %d, ppRank: %d, tpRank: %d, gen 1st token \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
     printf("tsRank: %d, ppRank: %d, tpRank: %d, getNextToken dims[%ld,%ld,%ld]  \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, dims[0], dims[1], dims[2]);
 #endif
     std::tuple<float *, int, int> result = decoder.forward(ids, dims, this->step++);
@@ -153,10 +185,12 @@ std::vector<int> GreedySearch::getNextToken(int *ids, int batchSize, int seqLen)
 std::vector<int> GreedySearch::getNextToken() {
     TimeLine t("Next Token");
     int64_t dims[3] = {batchSize, 1, 1};
-#if defined(DEBUG)
+
     DecoderContext *ctx = decoder.getContext();
+#ifdef DEBUG
     printf("tsRank: %d, ppRank: %d, tpRank: %d, 2nd getNextToken dims[%ld,%ld,%ld]  \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, dims[0], dims[1], dims[2]);
 #endif
+
     std::tuple<float *, int, int> result = decoder.forward(nextTokens.data(), dims, this->step++);
 
     return this->syncToken(result);
@@ -192,17 +226,17 @@ bool GreedySearch::setStopWords(std::vector<std::vector<int>> stopWordsList) {
 std::vector<int> GreedySearch::search(std::tuple<float *, int, int> &result) {
     TimeLine t("GreedySearch");
     DecoderContext *ctx = decoder.getContext();
-#if defined(DEBUG)
+#ifdef DEBUG
     printf("tsRank: %d, ppRank: %d, tpRank: %d, search  \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
 #endif
     float *outBuf = std::get<0>(result);
     int sampleOffset = std::get<1>(result);
     int sampleSize = std::get<2>(result);
-#if defined(DEBUG)
+#ifdef DEBUG
     printf("tsRank: %d, ppRank: %d, tpRank: %d, getting messenger  \n", ctx->tsRank, ctx->ppRank, ctx->tpRank);
 #endif
     Messenger &messenger = decoder.getMessenger();
-#if defined(DEBUG)
+#ifdef DEBUG
     printf("tsRank: %d, ppRank: %d, tpRank: %d, messenger rank%d size%d color%d section%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, messenger.getRank(), messenger.getSize(), messenger.getColor(), messenger.getSection());
 #endif
     auto msgerSize = messenger.getSize();
