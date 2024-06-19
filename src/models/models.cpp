@@ -587,6 +587,28 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
     KVCacheMgr &kvCacheMgr = KVCacheMgr::instance();
     workingGroup.clear();
 
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+    // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
+    DecoderContext *ctx = decoder->getContext();
+    if (ctx->ppSize > 1 && ctx->ppRank > 0) {
+        int curr_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+        int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
+        // TODO: determine the size of embbuf
+        int dim[4] = {0, 0, 0, 0};
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receiving dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank);
+#endif
+        MPI_Recv(&dim, 4, MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG 
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received dim %d %d %d %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, dim[0], dim[1], dim[2], dim[3]);
+#endif
+        inputIds_.resize(dim[0]);
+        seqLens_.resize(dim[1]);
+        seqIDs.resize(dim[2]);
+        maxLen.resize(dim[3]);
+    }
+#endif
+
     if (messenger.getSize() > 1) {
         // [total_length, batch_size, seqID_size, maxLen_size]
         int dim[4] = {static_cast<int>(inputIds_.size()), static_cast<int>(seqLens_.size()),
@@ -606,6 +628,21 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
         if (dim[2] != 0) { messenger.broadcast(seqIDs.data(), dim[2]); }
         if (dim[3] != 0) { messenger.broadcast(maxLen.data(), dim[3]); }
     }
+
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+    if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {
+        int next_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
+        int dim[4] = {static_cast<int>(inputIds_.size()), static_cast<int>(seqLens_.size()),
+            static_cast<int>(seqIDs.size()), static_cast<int>(maxLen.size())};
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, receiving dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank);
+#endif
+        MPI_Send(&dim, 4, MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#ifdef DEBUG 
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, dim sent %d %d %d %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, dim[0], dim[1], dim[2], dim[3]);
+#endif      
+    }
+#endif
 
     if (seqIDs.empty()) {
         batchSize = seqLens_.size();

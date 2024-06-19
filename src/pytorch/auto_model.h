@@ -244,7 +244,8 @@ public:
         std::vector<int> seqLens;
         std::vector<int> seqIDs;
         std::vector<int> maxLens;
-        if (model->getRank() == 0) {
+        // only tpRank = 0 ppRank =0 requires a real input
+        if (model->getRank() == 0 && model->getColor()==0) {
             TORCH_CHECK(inputIds_.has_value(), "Make sure master's input is not None.")
             TORCH_CHECK(inputIds_.value().dim() == 2 || inputIds_.value().dim() == 1,
                     "Make sure master's input is 1-D or 2-D.")
