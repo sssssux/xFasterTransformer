@@ -729,8 +729,44 @@ public:
         // Embedding
         this->embeddingForward(allInputIds.data(), embBuf, totInputSeqLen);
 
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+        // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
+        if (ctx->ppSize > 1 && ctx->ppRank > 0) {
+            int curr_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
+            // TODO: determine the size of embbuf
+            int count = totInputSeqLen * hiddenSize;
+            int32_t sequenceID = seqs[0]->getSequenceID();
+            TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Recv");
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, tag sequenceID %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, sequenceID);
+#endif
+            MPI_Recv(embBuf, count, MPI_FLOAT, prev_world_rank, sequenceID, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied embBuf count %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, count);
+#endif
+        }
+#endif
         // Decoder block (all layers)
         decoderBlock->forward(ctx, seqs, embBuf, embBuf);
+
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+        // If current pipeline stage isn't the end of stage, should send data to next stage and return nullptr
+        if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {
+            int next_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
+            int count = totInputSeqLen * hiddenSize;
+            int32_t sequenceID = seqs[0]->getSequenceID();
+            TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Send");
+#ifdef DEBUG 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, tag sequenceID %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, sequenceID);
+#endif
+            MPI_Send(embBuf, count, MPI_FLOAT, next_world_rank, sequenceID, MPI_COMM_WORLD);
+#ifdef DEBUG 
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, embBuf sent %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, count);
+#endif      
+            return std::tuple<float *, int, int>(nullptr, 0, 0);
+        }
+#endif
 
         // Prepare input for final Layer Norm (only care about the last row of the result)
         // Shape of embBuf: (total_input_seqlen, hiddenSize)
@@ -866,6 +902,10 @@ public:
     bool isMaster() { return messenger.isMaster(); }
 
     int getRank() { return messenger.getRank(); }
+
+    int getColor() { return messenger.getColor(); }
+
+    int getSection() { return messenger.getSection(); }
 
     int getEndId() { return endId; }
 

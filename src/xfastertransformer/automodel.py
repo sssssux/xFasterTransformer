@@ -94,6 +94,14 @@ class AutoModel:
     @property
     def rank(self):
         return self.model.get_rank()
+    
+    @property
+    def color(self):
+        return self.model.get_color()
+    
+    @property
+    def section(self):
+        return self.model.get_section()
 
     def finalize(self):
         return self.model.finalize()

@@ -88,6 +88,10 @@ public:
 
     int getRank() { return firstModel->getRank(); }
 
+    int getColor() { return firstModel->getColor(); }
+
+    int getSection() { return firstModel->getSection(); }
+
     int getEndId() { return firstModel->getEndId(); }
 
     void setPrefix(int *ids, int seqLen) { firstModel->setPrefix(ids, seqLen); }

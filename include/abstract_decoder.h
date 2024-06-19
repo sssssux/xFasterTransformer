@@ -51,6 +51,10 @@ public:
 
     virtual int getRank() = 0;
 
+    virtual int getColor() = 0;
+
+    virtual int getSection() = 0;
+
     virtual int getEndId() = 0;
 
     virtual void setPrefix(int *ids, int seqLen) = 0;

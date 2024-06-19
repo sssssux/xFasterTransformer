@@ -74,6 +74,10 @@ public:
 
     int64_t getRank() { return static_cast<int64_t>(model->getRank()); }
 
+    int64_t getColor() { return static_cast<int64_t>(model->getColor()); }
+
+    int64_t getSection() { return static_cast<int64_t>(model->getSection()); }
+
     bool isDone() { return model->isDone(); }
 
     void input(torch::optional<torch::Tensor> inputIds) {
