@@ -782,39 +782,70 @@ std::tuple<float *, int, int> Model::forward(bool logits_all) {
     }
 
     Messenger &messenger = decoder->getMessenger();
-    if (messenger.getSize() > 1) {
-        // Sync and gather all logits
-        float *outBuf = std::get<0>(result);
-
-        int workers = messenger.getSize();
-        int splitSize = vocabSize / workers;
-        std::vector<long unsigned int> recvCount(workers);
-        std::vector<long unsigned int> splitSizes(workers);
-        for (int i = 0; i < workers; i++) {
-            splitSizes[i] = splitSize;
-            if (i < vocabSize % workers) { splitSizes[i]++; }
-            recvCount[i] = splitSizes[i] * totalSeqSize;
-        }
-        // warning: vocabSize * totalSeqSize may exceed the range of int when seq and batch size is large.
-        logits.resize(vocabSize * totalSeqSize);
-        logitsRecvBuf.resize(vocabSize * totalSeqSize);
-        messenger.allgatherv(outBuf, recvCount[messenger.getRank()], logitsRecvBuf.data(), recvCount);
-
-        // Reorder
-        int offset = 0;
-        for (int i = 0; i < workers; ++i) {
-            for (int j = 0; j < totalSeqSize; ++j) {
-                memcpy(logits.data() + (offset + j * vocabSize),
-                        logitsRecvBuf.data() + offset * totalSeqSize + j * splitSizes[i],
-                        splitSizes[i] * sizeof(float));
+    DecoderContext *ctx = decoder->getContext();
+    if (ctx->ppSize == 1 || (ctx->ppSize > 1 && ctx->ppRank == ctx->ppSize - 1))
+    {
+        if (messenger.getSize() > 1) {
+            // Sync and gather all logits
+            float *outBuf = std::get<0>(result);
+            // SUSU TODO: get<0> result is nullptr?
+            int workers = messenger.getSize();
+            int splitSize = vocabSize / workers;
+            std::vector<long unsigned int> recvCount(workers);
+            std::vector<long unsigned int> splitSizes(workers);
+            for (int i = 0; i < workers; i++) {
+                splitSizes[i] = splitSize;
+                if (i < vocabSize % workers) { splitSizes[i]++; }
+                recvCount[i] = splitSizes[i] * totalSeqSize;
             }
-            offset += splitSizes[i];
-        }
+            // warning: vocabSize * totalSeqSize may exceed the range of int when seq and batch size is large.
+            logits.resize(vocabSize * totalSeqSize);
+            logitsRecvBuf.resize(vocabSize * totalSeqSize);
+            messenger.allgatherv(outBuf, recvCount[messenger.getRank()], logitsRecvBuf.data(), recvCount);
 
-        return std::tuple<float *, int, int>(logits.data(), totalSeqSize, vocabSize);
-    } else {
-        return std::tuple<float *, int, int>(std::get<0>(result), totalSeqSize, vocabSize);
+            // Reorder
+            int offset = 0;
+            for (int i = 0; i < workers; ++i) {
+                for (int j = 0; j < totalSeqSize; ++j) {
+                    memcpy(logits.data() + (offset + j * vocabSize),
+                            logitsRecvBuf.data() + offset * totalSeqSize + j * splitSizes[i],
+                            splitSizes[i] * sizeof(float));
+                }
+                offset += splitSizes[i];
+            }
+    #if DEBUG
+            DecoderContext *ctx = decoder->getContext();
+            printf("models.cpp forward1 tsRank %d, ppRank %d, tpRank %d, logits.data() %f totalSeqSize %d vocabSize%d \n", 
+                ctx->tsRank, ctx->ppRank, ctx->tpRank, logits.data()[0], totalSeqSize, vocabSize);
+    #endif
+            return std::tuple<float *, int, int>(logits.data(), totalSeqSize, vocabSize);
+        } else {
+    #if DEBUG
+            DecoderContext *ctx = decoder->getContext();
+            if (std::get<0>(result)==nullptr){
+                printf("models.cpp forward2 tsRank %d, ppRank %d, tpRank %d, std::get<0>(result) nullptr totalSeqSize %d vocabSize %d \n", 
+                    ctx->tsRank, ctx->ppRank, ctx->tpRank, totalSeqSize, vocabSize);
+            }else{
+                printf("models.cpp forward2 tsRank %d, ppRank %d, tpRank %d, std::get<0>(result) %f totalSeqSize %d vocabSize %d \n", 
+                    ctx->tsRank, ctx->ppRank, ctx->tpRank, std::get<0>(result)[0], totalSeqSize, vocabSize);
+            }      
+        
+    #endif
+            return std::tuple<float *, int, int>(std::get<0>(result), totalSeqSize, vocabSize);
+        }
     }
+    else{
+#if DEBUG
+        DecoderContext *ctx = decoder->getContext();
+        if (std::get<0>(result)==nullptr){
+            printf("models.cpp forward3 tsRank %d, ppRank %d, tpRank %d, return nullptr %d %d\n", 
+                ctx->tsRank, ctx->ppRank, ctx->tpRank, std::get<1>(result), std::get<2>(result));
+        }
+#endif
+        // return (nullptr, 0 , 0)
+        return std::tuple<float *, int, int>(std::get<0>(result), std::get<1>(result), std::get<2>(result));
+    }
+    
 }
 
 // We assume all gen kwargs in the batch are the same

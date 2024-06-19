@@ -153,7 +153,7 @@ public:
         float *outBuf = std::get<0>(result);
         int sampleOffset = std::get<1>(result);
         int sampleSize = std::get<2>(result);
-
+        
         // Create a torch::Tensor from the C array
         int64_t tdims[3] = {batchSize, seqLen, vocabSize};
         torch::Tensor ret = torch::from_blob(outBuf, tdims, torch::kFloat32);
@@ -223,11 +223,19 @@ public:
         float *outBuf = std::get<0>(result);
         int sampleOffset = std::get<1>(result);
         int sampleSize = std::get<2>(result);
-
+#if DEBUG
+        printf("After model forward tsRank %d, ppRank %d, tpRank %d, sampleOffset %d, sampleSize %d \n", \
+            model->getSection(), model->getColor(), model->getRank(), sampleOffset, sampleSize);
+#endif
         // Create a torch::Tensor from the C array
-        int64_t tdims[2] = {batchSize, vocabSize};
-        torch::Tensor ret = torch::from_blob(outBuf, tdims, torch::kFloat32);
-        return ret;
+        if(outBuf!=nullptr){
+            int64_t tdims[2] = {batchSize, vocabSize};
+            torch::Tensor ret = torch::from_blob(outBuf, tdims, torch::kFloat32);
+            return ret;
+        }else{
+            torch::Tensor ret = torch::empty({0}, torch::kFloat32);
+            return ret;
+        }  
     }
 
     torch::Tensor setInputCB(torch::optional<torch::Tensor> inputIds_, torch::optional<torch::Tensor> seqLens_,
