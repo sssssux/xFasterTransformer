@@ -593,7 +593,6 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
     if (ctx->ppSize > 1 && ctx->ppRank > 0) {
         int curr_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
         int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
-        // TODO: determine the size of embbuf
         int dim[4] = {0, 0, 0, 0};
 #ifdef DEBUG
         printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receiving dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank);
@@ -606,6 +605,40 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
         seqLens_.resize(dim[1]);
         seqIDs.resize(dim[2]);
         maxLen.resize(dim[3]);
+        if (!inputIds_.empty()) {
+            MPI_Recv(inputIds_.data(), dim[0], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received inputIds_%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                curr_world_rank, prev_world_rank, inputIds_[0]);
+#endif
+        }
+        if (!seqLens_.empty()) {
+            MPI_Recv(seqLens_.data(), dim[1], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqlen%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                curr_world_rank, prev_world_rank, seqLens_[0]);
+#endif
+        }
+        if (!seqIDs.empty()) {
+            MPI_Recv(seqIDs.data(), dim[2], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqid%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                curr_world_rank, prev_world_rank, seqIDs[0]);
+#endif
+        }
+        if (!maxLen.empty()) {
+            MPI_Recv(maxLen.data(), dim[3], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                curr_world_rank, prev_world_rank, maxLen[0]);
+#endif
+        }       
+        
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received inputIds_%d seqlen%d seqid%d maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+        curr_world_rank, prev_world_rank, inputIds_[0], seqLens_[0], seqIDs[0], maxLen[0]);
+#endif
+        
     }
 #endif
 
@@ -640,7 +673,35 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
         MPI_Send(&dim, 4, MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
 #ifdef DEBUG 
         printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, dim sent %d %d %d %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, dim[0], dim[1], dim[2], dim[3]);
-#endif      
+#endif
+        if (!inputIds_.empty()) {
+            MPI_Send(inputIds_.data(), dim[0], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send inputIds_%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                next_world_rank, inputIds_[0]);
+#endif
+        }
+        if (!seqLens_.empty()) {
+            MPI_Send(seqLens_.data(), dim[1], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                next_world_rank, seqLens_[0]);
+#endif
+        }
+        if (!seqIDs.empty()) {
+            MPI_Send(seqIDs.data(), dim[2], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqid%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                next_world_rank, seqIDs[0]);
+#endif
+        }
+        if (!maxLen.empty()) {
+            MPI_Send(maxLen.data(), dim[3], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send  maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                next_world_rank, maxLen[0]);
+#endif
+        }
     }
 #endif
 
