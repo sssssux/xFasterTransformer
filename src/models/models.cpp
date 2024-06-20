@@ -634,11 +634,6 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
 #endif
         }       
         
-#ifdef DEBUG
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received inputIds_%d seqlen%d seqid%d maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-        curr_world_rank, prev_world_rank, inputIds_[0], seqLens_[0], seqIDs[0], maxLen[0]);
-#endif
-        
     }
 #endif
 
