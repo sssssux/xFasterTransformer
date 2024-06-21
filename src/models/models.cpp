@@ -770,7 +770,7 @@ bool Model::freeSeqs(std::vector<int> &seqIDs) {
 #endif
         seqIDs.resize(dim);
         if (!seqIDs.empty()) {
-            MPI_Recv(seqIDs.data(), dim[2], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Recv(seqIDs.data(), dim, MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 #ifdef DEBUG
             printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqid%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
                 curr_world_rank, prev_world_rank, seqIDs[0]);
@@ -796,7 +796,7 @@ bool Model::freeSeqs(std::vector<int> &seqIDs) {
         int dim  = static_cast<int>(seqIDs.size());
         MPI_Send(&dim, 1, MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD); 
         if (!seqIDs.empty()) {
-            MPI_Send(seqIDs.data(), dim[2], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+            MPI_Send(seqIDs.data(), dim, MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
 #ifdef DEBUG
             printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqid%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
                 next_world_rank, seqIDs[0]);
