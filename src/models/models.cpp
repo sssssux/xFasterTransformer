@@ -757,6 +757,28 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
 }
 
 bool Model::freeSeqs(std::vector<int> &seqIDs) {
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+    // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
+    DecoderContext *ctx = decoder->getContext();
+    if (ctx->ppSize > 1 && ctx->ppRank > 0) {
+        int curr_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+        int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
+        int dim = 0;
+        MPI_Recv(&dim, 1, MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG 
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqid size %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, dim);
+#endif
+        seqIDs.resize(dim);
+        if (!seqIDs.empty()) {
+            MPI_Recv(seqIDs.data(), dim[2], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqid%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                curr_world_rank, prev_world_rank, seqIDs[0]);
+#endif
+        }
+    }
+#endif
+
     Messenger &messenger = Messenger::getInstance();
     // Sync
     if (messenger.getSize() > 1) {
@@ -768,6 +790,20 @@ bool Model::freeSeqs(std::vector<int> &seqIDs) {
         if (messenger.getRank() != 0) { seqIDs.resize(size); }
         if (seqIDs.size() != 0) { messenger.broadcast(seqIDs.data(), size); }
     }
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+    if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {
+        int next_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
+        int dim  = static_cast<int>(seqIDs.size());
+        MPI_Send(&dim, 1, MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD); 
+        if (!seqIDs.empty()) {
+            MPI_Send(seqIDs.data(), dim[2], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
+#ifdef DEBUG
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqid%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+                next_world_rank, seqIDs[0]);
+#endif
+        }
+    }
+#endif
 
     // If size is empty(), return true
     if (seqIDs.size() == 0) { return true; }
