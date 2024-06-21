@@ -244,8 +244,8 @@ public:
         std::vector<int> seqLens;
         std::vector<int> seqIDs;
         std::vector<int> maxLens;
-        // only tpRank = 0 ppRank =0 requires a real input
-        if (model->getRank() == 0 && model->getColor()==0) {
+        // only tpRank = 0 ppRank =0 tsRank =0 is real master; it requires a real input
+        if (model->getRank() == 0 && model->getColor() == 0 && model->getSection() == 0) {
             TORCH_CHECK(inputIds_.has_value(), "Make sure master's input is not None.")
             TORCH_CHECK(inputIds_.value().dim() == 2 || inputIds_.value().dim() == 1,
                     "Make sure master's input is 1-D or 2-D.")
@@ -295,8 +295,8 @@ public:
 
     bool freeSeqs(torch::optional<torch::Tensor> seqIDs_) {
         std::vector<int> seqIDs;
-        // only tpRank = 0 ppRank =0 requires a real seqIDs
-        if (model->getRank() == 0 && model->getColor()==0) {
+        // only tpRank = 0 ppRank =0 tsRank =0 requires a real seqIDs
+        if (model->getRank() == 0 && model->getColor() == 0 && model->getSection() == 0) {
             TORCH_CHECK(seqIDs_.has_value(), "Make sure master's input is not None.")
             torch::Tensor seqIDsTensor = seqIDs_.value().to(torch::kInt32);
             seqIDs.resize(seqIDsTensor.size(0));

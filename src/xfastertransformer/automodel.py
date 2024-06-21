@@ -102,7 +102,7 @@ class AutoModel:
     @property
     def section(self):
         return self.model.get_section()
-
+    
     def finalize(self):
         return self.model.finalize()
 

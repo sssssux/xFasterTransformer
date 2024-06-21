@@ -588,11 +588,14 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
     workingGroup.clear();
 
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
-    // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
     DecoderContext *ctx = decoder->getContext();
-    if (ctx->ppSize > 1 && ctx->ppRank > 0) {
-        int curr_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
-        int prev_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
+    // tsRank 1 ppRank 0 tpRank 0 receives dim[4] and inputs from tsRank 0 ppRank 0 tpRank 0
+    bool isRecvFromMaster = (ctx->tsSize > 1 && ctx->tsRank == 1 && ctx->ppRank == 0 && ctx->tpRank == 0);
+    // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
+    bool isRecvFromLastPP = (ctx->ppSize > 1 && ctx->ppRank > 0) ;
+    if (isRecvFromMaster || isRecvFromLastPP ) {
+        int curr_world_rank = isRecvFromMaster? 1 * (ctx->tpSize * ctx->ppSize) : ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+        int prev_world_rank = isRecvFromMaster? 0 * (ctx->tpSize * ctx->ppSize) : ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
         int dim[4] = {0, 0, 0, 0};
 #ifdef DEBUG
         printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receiving dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank);
@@ -633,10 +636,9 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
                 curr_world_rank, prev_world_rank, maxLen[0]);
 #endif
         }       
-        
     }
 #endif
-
+    
     if (messenger.getSize() > 1) {
         // [total_length, batch_size, seqID_size, maxLen_size]
         int dim[4] = {static_cast<int>(inputIds_.size()), static_cast<int>(seqLens_.size()),
@@ -658,8 +660,12 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
     }
 
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
-    if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {
-        int next_world_rank = ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
+    // tsRank 1 ppRank 0 tpRank 0 receives dim[4] and inputs from tsRank 0 ppRank 0 tpRank 0
+    bool isSendFromMaster = (ctx->tsSize > 1 && ctx->tsRank == 0 && ctx->ppRank == 0 && ctx->tpRank == 0);
+    // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
+    bool isSendToNextPP = (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) ;
+    if ( isSendFromMaster || isSendToNextPP ) {
+        int next_world_rank = isSendFromMaster? 1 * (ctx->tpSize * ctx->ppSize) : ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
         int dim[4] = {static_cast<int>(inputIds_.size()), static_cast<int>(seqLens_.size()),
             static_cast<int>(seqIDs.size()), static_cast<int>(maxLen.size())};
 #ifdef DEBUG

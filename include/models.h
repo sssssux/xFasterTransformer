@@ -87,7 +87,7 @@ public:
     int getColor();
 
     int getSection();
-
+    
     int getBatchSize() { return batchSize; }
 
     int getSeqLen() { return seqLen; }

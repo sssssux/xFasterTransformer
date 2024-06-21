@@ -96,7 +96,7 @@ public:
         return instance;
     }
 
-    bool isMaster() { return rank == 0 && color == 0; }
+    bool isMaster() { return rank == 0 && color == 0 && section==0; }
 
     int getRank() { return rank; }
 
@@ -105,7 +105,7 @@ public:
     int getColor() { return color; }
 
     int getSection() { return section; }
-
+    
     template <typename T>
     void reduceAdd(T *sendBuf, T *recvBuf, size_t count) {
         if (!check()) return;
