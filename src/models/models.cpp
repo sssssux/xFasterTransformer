@@ -923,7 +923,6 @@ std::tuple<float *, int, int> Model::forward(bool logits_all) {
         if (messenger.getSize() > 1) {
             // Sync and gather all logits
             float *outBuf = std::get<0>(result);
-            // SUSU TODO: get<0> result is nullptr?
             int workers = messenger.getSize();
             int splitSize = vocabSize / workers;
             std::vector<long unsigned int> recvCount(workers);
@@ -977,10 +976,9 @@ std::tuple<float *, int, int> Model::forward(bool logits_all) {
                 ctx->tsRank, ctx->ppRank, ctx->tpRank, std::get<1>(result), std::get<2>(result));
         }
 #endif
-        // return (nullptr, 0 , 0)
+        // if not last pipeline stage, return (nullptr, 0 , 0)
         return std::tuple<float *, int, int>(std::get<0>(result), std::get<1>(result), std::get<2>(result));
     }
-    
 }
 
 // We assume all gen kwargs in the batch are the same
