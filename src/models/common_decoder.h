@@ -765,7 +765,9 @@ public:
                 // Create a buffer to store all serialized data
                 KVCacheT *buffer = new KVCacheT[max_kvCount*2];
                 for (int i = 0; i < layersOnDuty; ++i) {
-
+#ifdef DEBUG
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, receiving KVCacheTensor presentValue&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
+#endif
                     MPI_Recv(buffer, mpi_count*2, mpiType, prev_world_rank, sequenceID, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                     std::vector<void *> keyCaches = KVCacheMgr::instance().getKey(i);
                     std::vector<KVCacheTensor<KVCacheT> *> presentKey = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&keyCaches);
@@ -795,7 +797,8 @@ public:
                         }
                     }
 #ifdef DEBUG
-                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, received KVCacheTensor presentValue&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, received and set KVCacheTensor presentValue&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
+
                     if ( i == 0 ){
                         dbg.debugPrint(">> Recv KVCacheTensor KVCacheTensor presentValue&presentValue: [%d layer %ld] :\n", i, max_kvCount);
                         dbg.dumpMatrix(buffer, 1, 8192, 1024, true);
@@ -848,7 +851,7 @@ public:
 
 #ifdef TOKEN_SPLIT_INFER
         // tsRank 0 2nd token as master(receive KV), tsRank 1 1st token as slave(send KV)
-        if (ctx->tsSize > 1 && ctx->tsRank == 0) {
+        if (ctx->tsSize > 1 && ctx->tsRank == 1) {
             int next_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
             int32_t sequenceID = seqs[0]->getSequenceID();
             int layersOnDuty = decoderBlock->size();
@@ -886,6 +889,9 @@ public:
                     std::vector<KVCacheTensor<KVCacheT> *> presentValue = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&valueCaches);
         
                     // Save the data of each KV tensor into the buffer
+#ifdef DEBUG
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, next_ts_rank %d, getBuf presentKey&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, i, max_kvCount);
+#endif
                     KVCacheT* tempPtr = buffer;
                     for(size_t i = 0; i < seqs.size(); ++i) {
                         const auto seq = seqs[i];
@@ -907,9 +913,11 @@ public:
                             tempPtr += tensorSize;
                         }
                     }
-
+#ifdef DEBUG
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, next_ts_rank %d, sending KVCacheTensor presentKey&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, i, max_kvCount);
+#endif
                     MPI_Send(buffer, mpi_count*2, mpiType, next_world_rank, sequenceID, MPI_COMM_WORLD);
-#if DEBUG
+#ifdef DEBUG
                     printf("tsRank: %d, ppRank: %d, tpRank: %d, next_ts_rank %d, sent KVCacheTensor presentKey&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, i, max_kvCount);
                     if ( i == 0 ){
                         dbg.debugPrint(">> Recv KVCacheTensor presentKey & presentValue : [%d layer %ld] :\n", i, max_kvCount);
