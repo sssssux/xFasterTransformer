@@ -729,6 +729,84 @@ public:
         // Embedding
         this->embeddingForward(allInputIds.data(), embBuf, totInputSeqLen);
 
+#ifdef TOKEN_SPLIT_INFER
+        // tsRank 0 2nd token as master(receive KV), tsRank 1 1st token as slave(send KV)
+        if (ctx->tsSize > 1 && ctx->tsRank == 0) {
+            int prev_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int curr_world_rank = 1 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int32_t sequenceID = seqs[0]->getSequenceID();
+            int layersOnDuty = decoderBlock->size();
+            std::vector<void *> firstkeyCaches = KVCacheMgr::instance().getKey(0);
+            std::vector<KVCacheTensor<KVCacheT> *> firstKey = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&firstkeyCaches);
+            assert(seqs.size() == firstKey.size() && "seq id and Key/Value size must be the same");
+            // Get the total length of all serialized data
+            uint64_t max_kvCount = 0;
+            for(size_t i = 0; i < seqs.size(); ++i) {
+                const auto seq = seqs[i];
+                const auto tensorPtr = firstKey[i];
+                // only 2nd token requires to receive KV Cache
+                if(seq->getStep()==1){
+                    max_kvCount += tensorPtr->getAllocSize();
+                }
+            }
+            if(max_kvCount){
+                MPI_Datatype mpiType;
+                uint64_t mpi_count = 0;
+                switch (getDataType<KVCacheT>()) {
+                    case DataType::int8: 
+                        mpiType = MPI_BYTE; mpi_count = max_kvCount; break;
+                    case DataType::fp16:
+                        mpiType = MPI_FLOAT;
+                        mpi_count = max_kvCount / 2;
+                        break;
+                    default: 
+                        mpiType = MPI_FLOAT; mpi_count = max_kvCount; break;
+                }
+                // Create a buffer to store all serialized data
+                KVCacheT *buffer = new KVCacheT[max_kvCount*2];
+                for (int i = 0; i < layersOnDuty; ++i) {
+
+                    MPI_Recv(buffer, mpi_count*2, mpiType, prev_world_rank, sequenceID, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    std::vector<void *> keyCaches = KVCacheMgr::instance().getKey(i);
+                    std::vector<KVCacheTensor<KVCacheT> *> presentKey = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&keyCaches);
+                    std::vector<void *> valueCaches = KVCacheMgr::instance().getValue(i);
+                    std::vector<KVCacheTensor<KVCacheT> *> presentValue = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&valueCaches);
+
+                    // Save the data of each KV tensor into the buffer
+                    KVCacheT* tempPtr = buffer;
+                    for(size_t i = 0; i < seqs.size(); ++i) {
+                        const auto seq = seqs[i];
+                        const auto tensorPtr = presentKey[i];
+                        uint64_t tensorSize = tensorPtr->getAllocSize();
+                        // only 2nd token requires to receive KV Cache
+                        if(seq->getStep()==1){
+                            tensorPtr->setData(tempPtr, tensorSize);
+                            tempPtr += tensorSize;
+                        }
+                    }
+                    for(size_t i = 0; i < seqs.size(); ++i) {
+                        const auto seq = seqs[i];
+                        const auto tensorPtr = presentValue[i];
+                        uint64_t tensorSize = tensorPtr->getAllocSize();
+                        // only 2nd token requires to receive KV Cache
+                        if(seq->getStep()==1){
+                            tensorPtr->setData(tempPtr, tensorSize);
+                            tempPtr += tensorSize;
+                        }
+                    }
+#ifdef DEBUG
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, received KVCacheTensor presentValue&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
+                    if ( i == 0 ){
+                        dbg.debugPrint(">> Recv KVCacheTensor KVCacheTensor presentValue&presentValue: [%d layer %ld] :\n", i, max_kvCount);
+                        dbg.dumpMatrix(buffer, 1, 8192, 1024, true);
+                    }
+#endif
+                }
+                delete[] buffer;           
+            }
+        }
+#endif
+
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
         // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
         if (ctx->ppSize > 1 && ctx->ppRank > 0) {
@@ -747,6 +825,7 @@ public:
 #endif
         }
 #endif
+
         // Decoder block (all layers)
         decoderBlock->forward(ctx, seqs, embBuf, embBuf);
 
@@ -764,10 +843,91 @@ public:
 #ifdef DEBUG 
             printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, embBuf sent %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, count);
 #endif      
-            return std::tuple<float *, int, int>(nullptr, 0, 0);
         }
 #endif
 
+#ifdef TOKEN_SPLIT_INFER
+        // tsRank 0 2nd token as master(receive KV), tsRank 1 1st token as slave(send KV)
+        if (ctx->tsSize > 1 && ctx->tsRank == 0) {
+            int next_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int32_t sequenceID = seqs[0]->getSequenceID();
+            int layersOnDuty = decoderBlock->size();
+            std::vector<void *> firstkeyCaches = KVCacheMgr::instance().getKey(0);
+            std::vector<KVCacheTensor<KVCacheT> *> firstKey = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&firstkeyCaches);
+            assert(seqs.size() == firstKey.size() && "seq id and Key/Value size must be the same");
+            // Get the total length of all serialized data
+            uint64_t max_kvCount = 0;
+            for(size_t i = 0; i < seqs.size(); ++i) {
+                const auto seq = seqs[i];
+                const auto tensorPtr = firstKey[i];
+                // only 1st token requires to send KV Cache
+                if(seq->getStep()==0){
+                    max_kvCount += tensorPtr->getAllocSize();
+                }
+            }
+            if(max_kvCount){
+                MPI_Datatype mpiType;
+                uint64_t mpi_count = 0;
+                switch (getDataType<KVCacheT>()) {
+                    case DataType::int8: 
+                        mpiType = MPI_BYTE; mpi_count = max_kvCount; break;
+                    case DataType::fp16:
+                        mpiType = MPI_FLOAT;
+                        mpi_count = max_kvCount / 2;
+                        break;
+                    default: 
+                        mpiType = MPI_FLOAT; mpi_count = max_kvCount; break;
+                }
+                KVCacheT *buffer = new KVCacheT[max_kvCount*2];
+                for (int i = 0; i < layersOnDuty; ++i) {
+                    std::vector<void *> keyCaches = KVCacheMgr::instance().getKey(i);
+                    std::vector<KVCacheTensor<KVCacheT> *> presentKey = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&keyCaches);
+                    std::vector<void *> valueCaches = KVCacheMgr::instance().getValue(i);
+                    std::vector<KVCacheTensor<KVCacheT> *> presentValue = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&valueCaches);
+        
+                    // Save the data of each KV tensor into the buffer
+                    KVCacheT* tempPtr = buffer;
+                    for(size_t i = 0; i < seqs.size(); ++i) {
+                        const auto seq = seqs[i];
+                        const auto tensorPtr = presentKey[i];
+                        uint64_t tensorSize = tensorPtr->getAllocSize();
+                        // only 1st token requires to send KV Cache
+                        if(seq->getStep()==0){
+                            memcpy(tempPtr, tensorPtr->getData(), tensorSize);
+                            tempPtr += tensorSize;
+                        }
+                    }
+                    for(size_t i = 0; i < seqs.size(); ++i) {
+                        const auto seq = seqs[i];
+                        const auto tensorPtr = presentValue[i];
+                        uint64_t tensorSize = tensorPtr->getAllocSize();
+                        // only 1st token requires to send KV Cache
+                        if(seq->getStep()==0){
+                            memcpy(tempPtr, tensorPtr->getData(), tensorSize);
+                            tempPtr += tensorSize;
+                        }
+                    }
+
+                    MPI_Send(buffer, mpi_count*2, mpiType, next_world_rank, sequenceID, MPI_COMM_WORLD);
+#if DEBUG
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, next_ts_rank %d, sent KVCacheTensor presentKey&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, i, max_kvCount);
+                    if ( i == 0 ){
+                        dbg.debugPrint(">> Recv KVCacheTensor presentKey & presentValue : [%d layer %ld] :\n", i, max_kvCount);
+                        dbg.dumpMatrix(buffer, 1, 8192, 1024, true);
+                    }
+#endif
+                }
+                delete[] buffer;            
+            }
+        }
+#endif
+
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+        // If current pipeline stage isn't the end of stage, should send data to next stage and return nullptr
+        if (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) {  
+            return std::tuple<float *, int, int>(nullptr, 0, 0);
+        }
+#endif
         // Prepare input for final Layer Norm (only care about the last row of the result)
         // Shape of embBuf: (total_input_seqlen, hiddenSize)
         MlpOutT *lnIn = embBuf;
