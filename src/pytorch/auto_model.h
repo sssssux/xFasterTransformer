@@ -223,7 +223,7 @@ public:
         float *outBuf = std::get<0>(result);
         int sampleOffset = std::get<1>(result);
         int sampleSize = std::get<2>(result);
-#if DEBUG
+#ifdef DEBUG
         printf("After model forward tsRank %d, ppRank %d, tpRank %d, sampleOffset %d, sampleSize %d \n", \
             model->getSection(), model->getColor(), model->getRank(), sampleOffset, sampleSize);
 #endif

@@ -573,6 +573,95 @@ std::vector<int> Model::set_input(
     return seqIDs;
 }
 
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+void Model::send_input(const std::vector<int>& inputIds, const std::vector<int>& seqLens, 
+        const std::vector<int>& seqIDs, const std::vector<int>& maxLen, int destRank) {
+    int dim[4] = {static_cast<int>(inputIds.size()), static_cast<int>(seqLens.size()),
+        static_cast<int>(seqIDs.size()), static_cast<int>(maxLen.size())};
+#ifdef DEBUG
+    DecoderContext *ctx = decoder->getContext();
+    printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, sending dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, destRank);
+#endif
+    MPI_Send(&dim, 4, MPI_INT, destRank, destRank, MPI_COMM_WORLD);
+#ifdef DEBUG 
+    printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, dim sent %d %d %d %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, destRank, dim[0], dim[1], dim[2], dim[3]);
+#endif
+    if (!inputIds.empty()) {
+        MPI_Send(inputIds.data(), dim[0], MPI_INT, destRank, destRank, MPI_COMM_WORLD);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send inputIds_%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            destRank, inputIds[0]);
+#endif
+    }
+    if (!seqLens.empty()) {
+        MPI_Send(seqLens.data(), dim[1], MPI_INT, destRank, destRank, MPI_COMM_WORLD);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            destRank, seqLens[0]);
+#endif
+    }
+    if (!seqIDs.empty()) {
+        MPI_Send(seqIDs.data(), dim[2], MPI_INT, destRank, destRank, MPI_COMM_WORLD);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqid%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            destRank, seqIDs[0]);
+#endif
+    }
+    if (!maxLen.empty()) {
+        MPI_Send(maxLen.data(), dim[3], MPI_INT, destRank, destRank, MPI_COMM_WORLD);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send  maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            destRank, maxLen[0]);
+#endif
+    }
+}
+
+void Model::receive_input(std::vector<int>& inputIds, std::vector<int>& seqLens, 
+        std::vector<int>& seqIDs, std::vector<int>& maxLen, int sourceRank, int currRank) {
+    int dim[4] = {0, 0, 0, 0};
+#ifdef DEBUG
+    DecoderContext *ctx = decoder->getContext();
+    printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receiving dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, currRank, sourceRank);
+#endif
+    MPI_Recv(&dim, 4, MPI_INT, sourceRank, currRank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG 
+    printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received dim %d %d %d %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, currRank, sourceRank, dim[0], dim[1], dim[2], dim[3]);
+#endif
+    inputIds.resize(dim[0]);
+    seqLens.resize(dim[1]);
+    seqIDs.resize(dim[2]);
+    maxLen.resize(dim[3]);
+    if (!inputIds.empty()) {
+        MPI_Recv(inputIds.data(), dim[0], MPI_INT, sourceRank, currRank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received inputIds_%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            currRank, sourceRank, inputIds[0]);
+#endif
+    }
+    if (!seqLens.empty()) {
+        MPI_Recv(seqLens.data(), dim[1], MPI_INT, sourceRank, currRank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqlen%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            currRank, sourceRank, seqLens[0]);
+#endif
+    }
+    if (!seqIDs.empty()) {
+        MPI_Recv(seqIDs.data(), dim[2], MPI_INT, sourceRank, currRank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqid%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            currRank, sourceRank, seqIDs[0]);
+#endif
+    }
+    if (!maxLen.empty()) {
+        MPI_Recv(maxLen.data(), dim[3], MPI_INT, sourceRank, currRank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef DEBUG
+        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
+            currRank, sourceRank, maxLen[0]);
+#endif
+    }   
+}
+#endif
+
 std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<int32_t> &seqLens_,
         std::vector<int> seqIDs, std::vector<int> &maxLen) {
     // inputIds_: for prompt(1st token), contains all tokens of the batch
@@ -590,52 +679,13 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
     DecoderContext *ctx = decoder->getContext();
     // tsRank 1 ppRank 0 tpRank 0 receives dim[4] and inputs from tsRank 0 ppRank 0 tpRank 0
-    bool isRecvFromMaster = (ctx->tsSize > 1 && ctx->tsRank == 1 && ctx->ppRank == 0 && ctx->tpRank == 0);
+    bool isRecvFromMaster = (ctx->tsSize > 1 && ctx->tsRank == 1 && ctx->ppRank == 0 && ctx->tpRank == 0  && seqIDs.empty());
     // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
     bool isRecvFromLastPP = (ctx->ppSize > 1 && ctx->ppRank > 0) ;
     if (isRecvFromMaster || isRecvFromLastPP ) {
         int curr_world_rank = isRecvFromMaster? 1 * (ctx->tpSize * ctx->ppSize) : ctx->tsRank * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
         int prev_world_rank = isRecvFromMaster? 0 * (ctx->tpSize * ctx->ppSize) : ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank - 1) * ctx->tpSize + ctx->tpRank;
-        int dim[4] = {0, 0, 0, 0};
-#ifdef DEBUG
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receiving dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank);
-#endif
-        MPI_Recv(&dim, 4, MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#ifdef DEBUG 
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received dim %d %d %d %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, dim[0], dim[1], dim[2], dim[3]);
-#endif
-        inputIds_.resize(dim[0]);
-        seqLens_.resize(dim[1]);
-        seqIDs.resize(dim[2]);
-        maxLen.resize(dim[3]);
-        if (!inputIds_.empty()) {
-            MPI_Recv(inputIds_.data(), dim[0], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received inputIds_%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                curr_world_rank, prev_world_rank, inputIds_[0]);
-#endif
-        }
-        if (!seqLens_.empty()) {
-            MPI_Recv(seqLens_.data(), dim[1], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqlen%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                curr_world_rank, prev_world_rank, seqLens_[0]);
-#endif
-        }
-        if (!seqIDs.empty()) {
-            MPI_Recv(seqIDs.data(), dim[2], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received seqid%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                curr_world_rank, prev_world_rank, seqIDs[0]);
-#endif
-        }
-        if (!maxLen.empty()) {
-            MPI_Recv(maxLen.data(), dim[3], MPI_INT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                curr_world_rank, prev_world_rank, maxLen[0]);
-#endif
-        }       
+        receive_input(inputIds_, seqLens_, seqIDs, maxLen, prev_world_rank, curr_world_rank);
     }
 #endif
     
@@ -660,48 +710,16 @@ std::vector<int> Model::set_input(std::vector<int32_t> &inputIds_, std::vector<i
     }
 
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
-    // tsRank 1 ppRank 0 tpRank 0 receives dim[4] and inputs from tsRank 0 ppRank 0 tpRank 0
-    bool isSendFromMaster = (ctx->tsSize > 1 && ctx->tsRank == 0 && ctx->ppRank == 0 && ctx->tpRank == 0);
+    // tsRank 1 ppRank 0 tpRank 0 receives dim[4] and inputs from tsRank 0 ppRank 0 tpRank 0 at 1st token
+    bool isSendFromMaster = (ctx->tsSize > 1 && ctx->tsRank == 0 && ctx->ppRank == 0 && ctx->tpRank == 0 && seqIDs.empty());
+    int nextWorldRankMaster = isSendFromMaster ? 1 * (ctx->tpSize * ctx->ppSize) : -1;
     // if current pipeline parallel stage rank isn't the first stage, should receive previous stage data
     bool isSendToNextPP = (ctx->ppSize > 1 && ctx->ppRank < ctx->ppSize - 1) ;
-    if ( isSendFromMaster || isSendToNextPP ) {
-        int next_world_rank = isSendFromMaster? 1 * (ctx->tpSize * ctx->ppSize) : ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank;
-        int dim[4] = {static_cast<int>(inputIds_.size()), static_cast<int>(seqLens_.size()),
-            static_cast<int>(seqIDs.size()), static_cast<int>(maxLen.size())};
-#ifdef DEBUG
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, receiving dim \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank);
-#endif
-        MPI_Send(&dim, 4, MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
-#ifdef DEBUG 
-        printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, dim sent %d %d %d %d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, next_world_rank, dim[0], dim[1], dim[2], dim[3]);
-#endif
-        if (!inputIds_.empty()) {
-            MPI_Send(inputIds_.data(), dim[0], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send inputIds_%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                next_world_rank, inputIds_[0]);
-#endif
-        }
-        if (!seqLens_.empty()) {
-            MPI_Send(seqLens_.data(), dim[1], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                next_world_rank, seqLens_[0]);
-#endif
-        }
-        if (!seqIDs.empty()) {
-            MPI_Send(seqIDs.data(), dim[2], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send seqid%d\n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                next_world_rank, seqIDs[0]);
-#endif
-        }
-        if (!maxLen.empty()) {
-            MPI_Send(maxLen.data(), dim[3], MPI_INT, next_world_rank, next_world_rank, MPI_COMM_WORLD);
-#ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, next_world_rank %d, send  maxlen%d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, 
-                next_world_rank, maxLen[0]);
-#endif
+    int nextWorldRankNextPP = isSendToNextPP ? (ctx->tsRank * (ctx->tpSize * ctx->ppSize) + (ctx->ppRank + 1) * ctx->tpSize + ctx->tpRank) : -1;
+    int destRanks[2] = {nextWorldRankMaster, nextWorldRankNextPP};
+    for (int i = 0; i < 2; ++i) {
+        if (destRanks[i] != -1) {
+            send_input(inputIds_, seqLens_, seqIDs, maxLen, destRanks[i]);
         }
     }
 #endif
@@ -818,7 +836,7 @@ bool Model::freeSeqs(std::vector<int> &seqIDs) {
     SequencePool &seqPool = SequencePool::getInstance();
     bool ret = true;
     for (auto &id : seqIDs) {
-#if DEBUG
+#ifdef DEBUG
         printf("tsRank %d ppRank %d tpRank %d: delete sequence id %d\n", messenger.getSection(), messenger.getColor(), messenger.getRank(), id);
 #endif
         ret = ret && kvCacheMgr.delSequence(id);
@@ -947,15 +965,13 @@ std::tuple<float *, int, int> Model::forward(bool logits_all) {
                 }
                 offset += splitSizes[i];
             }
-    #if DEBUG
-            DecoderContext *ctx = decoder->getContext();
+#ifdef DEBUG
             printf("models.cpp forward1 tsRank %d, ppRank %d, tpRank %d, logits.data() %f totalSeqSize %d vocabSize%d \n", 
                 ctx->tsRank, ctx->ppRank, ctx->tpRank, logits.data()[0], totalSeqSize, vocabSize);
-    #endif
+#endif
             return std::tuple<float *, int, int>(logits.data(), totalSeqSize, vocabSize);
         } else {
-    #if DEBUG
-            DecoderContext *ctx = decoder->getContext();
+#ifdef DEBUG
             if (std::get<0>(result)==nullptr){
                 printf("models.cpp forward2 tsRank %d, ppRank %d, tpRank %d, std::get<0>(result) nullptr totalSeqSize %d vocabSize %d \n", 
                     ctx->tsRank, ctx->ppRank, ctx->tpRank, totalSeqSize, vocabSize);
@@ -964,13 +980,12 @@ std::tuple<float *, int, int> Model::forward(bool logits_all) {
                     ctx->tsRank, ctx->ppRank, ctx->tpRank, std::get<0>(result)[0], totalSeqSize, vocabSize);
             }      
         
-    #endif
+#endif
             return std::tuple<float *, int, int>(std::get<0>(result), totalSeqSize, vocabSize);
         }
     }
     else{
-#if DEBUG
-        DecoderContext *ctx = decoder->getContext();
+#ifdef DEBUG
         if (std::get<0>(result)==nullptr){
             printf("models.cpp forward3 tsRank %d, ppRank %d, tpRank %d, return nullptr %d %d\n", 
                 ctx->tsRank, ctx->ppRank, ctx->tpRank, std::get<1>(result), std::get<2>(result));

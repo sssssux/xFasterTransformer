@@ -68,9 +68,18 @@ public:
     std::vector<int> set_input(
             std::vector<int32_t> &inputIds_, int batchSize_, std::vector<int> seqIDs, const std::vector<int> &maxLen);
 
+#if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
+    void send_input(const std::vector<int>& inputIds, const std::vector<int>& seqLens, 
+            const std::vector<int>& seqIDs, const std::vector<int>& maxLen, int destRank);
+
+    void receive_input(std::vector<int>& inputIds, std::vector<int>& seqLens, 
+            std::vector<int>& seqIDs, std::vector<int>& maxLen, int sourceRank, int currRank);
+            
+#endif
     // Only used for model.forward()
     std::vector<int> set_input(std::vector<int32_t> &inputIds_, std::vector<int32_t> &seqLens_, std::vector<int> seqIDs,
             std::vector<int> &maxLen);
+
 
     bool isDone();
 

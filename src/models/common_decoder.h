@@ -436,11 +436,11 @@ public:
             MPI_Recv(&sequenceID, 1, MPI_INT32_T, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             TimeLine t("Decoder.Seq" + std::to_string(sequenceID) + ".MPI_Recv");
 #ifdef DEBUG
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied sequenceID %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, sequenceID);
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received sequenceID %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, sequenceID);
 #endif
             MPI_Recv(embBuf, count, MPI_FLOAT, prev_world_rank, curr_world_rank, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 #ifdef DEBUG 
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied embBuf count %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, count);
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received embBuf count %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, count);
 #endif
             // TODO: Error: different scope when dynamic loading so file
             // this->messenger.worldRecvFP32(embBuf, count, prev_world_rank, curr_world_rank);
@@ -454,7 +454,6 @@ public:
             TaskWaitingQueue::getInstance().push(SequencePool::getInstance().get(sequenceID));
         }
 #endif
-
 
 #if defined(PIPELINE_PARALLEL) || defined(TOKEN_SPLIT_INFER)
         if (!InputQueue::getInstance().empty()) {
@@ -715,7 +714,9 @@ public:
             auto ids = seq->getInputTokens();
             allInputIds.insert(allInputIds.end(), ids.begin(), ids.end());
         }
-
+#ifdef DEBUG
+        printf("tsRank %d, ppRank %d, tpRank %d, before embeddingForward totInputSeqLen %d allInputIds[0] %d\n",ctx->tsRank, ctx->ppRank, ctx->tpRank, totInputSeqLen, allInputIds[0]);
+#endif
         // Prepare context
         ctx->resize(totInputSeqLen);
 
@@ -725,19 +726,36 @@ public:
 
         AttnInT *embBuf = (AttnInT *)actBuffers->Data();
         MlpOutT *outBuf = (MlpOutT *)(embBuf + totInputSeqLen * hiddenSize);
-
+        
         // Embedding
         this->embeddingForward(allInputIds.data(), embBuf, totInputSeqLen);
 
 #ifdef TOKEN_SPLIT_INFER
         // tsRank 0 2nd token as master(receive KV), tsRank 1 1st token as slave(send KV)
-        if (ctx->tsSize > 1 && ctx->tsRank == 0) {
-            int prev_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
-            int curr_world_rank = 1 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+        bool isStep0 = false;
+        bool isStep1 = false;
+        for(const auto &seq :seqs) {
+            isStep0 = isStep0 || (seq->getStep()==0);
+            isStep1 = isStep1 || (seq->getStep()==1);
+        }
+        if (ctx->tsSize > 1 && ctx->tsRank == 0 && isStep0) {
+            int prev_world_rank = 1 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
+            int curr_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
             int32_t sequenceID = seqs[0]->getSequenceID();
             int layersOnDuty = decoderBlock->size();
+            // Data preparation
+            std::vector<int> seqIDs(seqs.size());
+            for (int i = 0; i < seqs.size(); ++i) {
+                seqIDs[i] = seqs[i]->getSequenceID();
+            }
+            // TODO: check and prepare KV cache only needed
+            KVCacheMgr::instance().prepareCache(seqIDs);
+
             std::vector<void *> firstkeyCaches = KVCacheMgr::instance().getKey(0);
             std::vector<KVCacheTensor<KVCacheT> *> firstKey = *reinterpret_cast<std::vector<KVCacheTensor<KVCacheT> *> *>(&firstkeyCaches);
+#ifdef DEBUG
+            printf("tsRank %d, ppRank %d, tpRank %d, firstKey.size() %ld\n",ctx->tsRank, ctx->ppRank, ctx->tpRank, firstKey.size());
+#endif
             assert(seqs.size() == firstKey.size() && "seq id and Key/Value size must be the same");
             // Get the total length of all serialized data
             uint64_t max_kvCount = 0;
@@ -745,10 +763,13 @@ public:
                 const auto seq = seqs[i];
                 const auto tensorPtr = firstKey[i];
                 // only 2nd token requires to receive KV Cache
-                if(seq->getStep()==1){
+                if(seq->getStep()==0){
                     max_kvCount += tensorPtr->getAllocSize();
                 }
             }
+#ifdef DEBUG
+            printf("tsRank %d, ppRank %d, tpRank %d, max_kvCount %ld\n",ctx->tsRank, ctx->ppRank, ctx->tpRank, max_kvCount);
+#endif
             if(max_kvCount){
                 MPI_Datatype mpiType;
                 uint64_t mpi_count = 0;
@@ -766,7 +787,7 @@ public:
                 KVCacheT *buffer = new KVCacheT[max_kvCount*2];
                 for (int i = 0; i < layersOnDuty; ++i) {
 #ifdef DEBUG
-                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, receiving KVCacheTensor presentValue&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, receiving KVCacheTensor presentKey&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
 #endif
                     MPI_Recv(buffer, mpi_count*2, mpiType, prev_world_rank, sequenceID, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                     std::vector<void *> keyCaches = KVCacheMgr::instance().getKey(i);
@@ -781,7 +802,7 @@ public:
                         const auto tensorPtr = presentKey[i];
                         uint64_t tensorSize = tensorPtr->getAllocSize();
                         // only 2nd token requires to receive KV Cache
-                        if(seq->getStep()==1){
+                        if(seq->getStep()==0){
                             tensorPtr->setData(tempPtr, tensorSize);
                             tempPtr += tensorSize;
                         }
@@ -791,22 +812,22 @@ public:
                         const auto tensorPtr = presentValue[i];
                         uint64_t tensorSize = tensorPtr->getAllocSize();
                         // only 2nd token requires to receive KV Cache
-                        if(seq->getStep()==1){
+                        if(seq->getStep()==0){
                             tensorPtr->setData(tempPtr, tensorSize);
                             tempPtr += tensorSize;
                         }
                     }
 #ifdef DEBUG
-                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, received and set KVCacheTensor presentValue&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
-
+                    printf("tsRank: %d, ppRank: %d, tpRank: %d, previous_ts_rank %d, received and set KVCacheTensor presentKey&presentValue: [%d layer %ld] \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, prev_world_rank, i, max_kvCount);
                     if ( i == 0 ){
-                        dbg.debugPrint(">> Recv KVCacheTensor KVCacheTensor presentValue&presentValue: [%d layer %ld] :\n", i, max_kvCount);
+                        dbg.debugPrint(">> Recv KVCacheTensor KVCacheTensor presentKey&presentValue: [%d layer %ld] :\n", i, max_kvCount);
                         dbg.dumpMatrix(buffer, 1, 8192, 1024, true);
                     }
 #endif
                 }
                 delete[] buffer;           
             }
+            return std::tuple<float *, int, int>(nullptr, 0, 0);
         }
 #endif
 
@@ -824,7 +845,7 @@ public:
 #endif
             MPI_Recv(embBuf, count, MPI_FLOAT, prev_world_rank, sequenceID, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 #ifdef DEBUG 
-            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, receivied embBuf count %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, count);
+            printf("tsRank: %d, ppRank: %d, tpRank: %d, curr_world_rank %d, prev_world_rank %d, received embBuf count %d \n", ctx->tsRank, ctx->ppRank, ctx->tpRank, curr_world_rank, prev_world_rank, count);
 #endif
         }
 #endif
@@ -851,7 +872,7 @@ public:
 
 #ifdef TOKEN_SPLIT_INFER
         // tsRank 0 2nd token as master(receive KV), tsRank 1 1st token as slave(send KV)
-        if (ctx->tsSize > 1 && ctx->tsRank == 1) {
+        if (ctx->tsSize > 1 && ctx->tsRank == 1 && isStep0) {
             int next_world_rank = 0 * (ctx->tpSize * ctx->ppSize) + ctx->ppRank * ctx->tpSize + ctx->tpRank;
             int32_t sequenceID = seqs[0]->getSequenceID();
             int layersOnDuty = decoderBlock->size();
@@ -899,7 +920,7 @@ public:
                         uint64_t tensorSize = tensorPtr->getAllocSize();
                         // only 1st token requires to send KV Cache
                         if(seq->getStep()==0){
-                            memcpy(tempPtr, tensorPtr->getData(), tensorSize);
+                            memcpy(tempPtr, tensorPtr->getData(), tensorSize*sizeof(KVCacheT));
                             tempPtr += tensorSize;
                         }
                     }
@@ -909,7 +930,7 @@ public:
                         uint64_t tensorSize = tensorPtr->getAllocSize();
                         // only 1st token requires to send KV Cache
                         if(seq->getStep()==0){
-                            memcpy(tempPtr, tensorPtr->getData(), tensorSize);
+                            memcpy(tempPtr, tensorPtr->getData(), tensorSize*sizeof(KVCacheT));
                             tempPtr += tensorSize;
                         }
                     }
